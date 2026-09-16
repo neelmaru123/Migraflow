@@ -31,8 +31,16 @@ class DDLExecutor:
                 db_name = clean_url.rsplit("/", 1)[-1] if "/" in clean_url else "target_db"
                 if not db_name or db_name.startswith("mongodb"):
                     db_name = "target_db"
-                client = pymongo.MongoClient(db_url, serverSelectionTimeoutMS=5000)
-                client.admin.command('ping')
+                try:
+                    client = pymongo.MongoClient(db_url, serverSelectionTimeoutMS=4000)
+                    client.admin.command('ping')
+                except Exception:
+                    clean_conn = db_url.split("@")[-1] if "@" in db_url else db_url
+                    if not clean_conn.startswith("mongodb://") and not clean_conn.startswith("mongodb+srv://"):
+                        clean_conn = f"mongodb://{clean_conn}"
+                    clean_conn = clean_conn.split("?")[0]
+                    client = pymongo.MongoClient(clean_conn, serverSelectionTimeoutMS=4000)
+                    client.admin.command('ping')
                 # Access database namespace so it is registered
                 _ = client[db_name]
                 logger.info(f"Target MongoDB database '{db_name}' verified and ready.")
@@ -53,30 +61,26 @@ class DDLExecutor:
             exc_str = str(exc)
             if (
                 "1049" in exc_str
+                or "database" in exc_str.lower() and "does not exist" in exc_str.lower()
+                or "FATAL:  database" in exc_str
                 or "Unknown database" in exc_str
-                or "does not exist" in exc_str
-                or "database" in exc_str.lower()
             ):
+                from urllib.parse import urlparse
                 parsed = urlparse(db_url)
                 db_name = parsed.path.lstrip('/')
-                if not db_name:
-                    return
+                logger.info(f"Target database '{db_name}' does not exist yet. Attempting auto-creation...")
+
                 try:
                     if "mysql" in db_url_lower:
-                        root_url = db_url.replace(f"/{db_name}", "/mysql")
-                        root_engine = _get_engine(root_url)
-                        with root_engine.connect() as conn:
-                            conn.execute(text(f"CREATE DATABASE IF NOT EXISTS `{db_name}`"))
-                            try:
-                                conn.commit()
-                            except Exception:
-                                pass
-                        logger.info(f"Auto-created missing MySQL target database '{db_name}'.")
+                        admin_url = db_url.rsplit('/', 1)[0] + '/'
+                        adm_engine = _get_engine(admin_url)
+                        with adm_engine.connect() as conn:
+                            conn.execute(text(f"CREATE DATABASE IF NOT EXISTS `{db_name}` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"))
+                            logger.info(f"Auto-created missing MySQL target database '{db_name}'.")
                     elif "postgres" in db_url_lower:
-                        root_url = db_url.replace(f"/{db_name}", "/postgres")
-                        root_engine = _get_engine(root_url)
-                        with root_engine.execution_options(isolation_level="AUTOCOMMIT").connect() as conn:
-                            # Verify if database already exists before creating
+                        admin_url = db_url.rsplit('/', 1)[0] + '/postgres'
+                        adm_engine = _get_engine(admin_url)
+                        with adm_engine.execution_options(isolation_level="AUTOCOMMIT").connect() as conn:
                             chk_res = conn.execute(
                                 text("SELECT 1 FROM pg_database WHERE datname = :dbname"),
                                 {"dbname": db_name},
@@ -105,7 +109,15 @@ class DDLExecutor:
                 pymongo = importlib.import_module("pymongo")
                 clean_url = db_url.split("?")[0]
                 db_name = clean_url.rsplit("/", 1)[-1] if "/" in clean_url else "target_db"
-                client = pymongo.MongoClient(db_url, serverSelectionTimeoutMS=4000)
+                try:
+                    client = pymongo.MongoClient(db_url, serverSelectionTimeoutMS=3000)
+                    client.admin.command('ping')
+                except Exception:
+                    clean_conn = db_url.split("@")[-1] if "@" in db_url else db_url
+                    if not clean_conn.startswith("mongodb://") and not clean_conn.startswith("mongodb+srv://"):
+                        clean_conn = f"mongodb://{clean_conn}"
+                    clean_conn = clean_conn.split("?")[0]
+                    client = pymongo.MongoClient(clean_conn, serverSelectionTimeoutMS=3000)
                 db = client[db_name]
                 for coll_name in db.list_collection_names():
                     if coll_name.startswith("system."):

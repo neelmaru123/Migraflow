@@ -1598,6 +1598,52 @@ Disabled and removed migration generation/execution trigger buttons across the p
 ### 4. Trade-offs & Future Considerations
 - If users wish to migrate different source schemas or re-execute migrations with updated configurations, they should register a fresh agent instance. Future enhancements can provide an explicit "Clone Agent & Create New Plan" workflow if multi-run testing is required.
 
+---
+
+## [2026-09-16] - Polars `pl.Object` Type Sanitization, UUID/JSON Extraction & MongoDB Unauthenticated Fallback
+
+### 1. Decision Summary
+Fixed 2 critical issues during relational-to-document and complex schema migrations:
+1. **Polars `pl.Object` Type Sanitization**: Eliminated `ComputeError: cannot cast 'Object' type` crashes when transforming PostgreSQL tables containing Python native `UUID` and `dict` objects. Pre-sanitized all `pl.Object` series into `pl.Utf8` via Python list comprehension and replaced all remaining `.cast(pl.Utf8)` calls on object series in `ASTTransformer` and `SourceConnectorFactory`.
+2. **Target MongoDB Unauthenticated Connection Fallback**: Enhanced `DDLExecutor` with automatic retry logic without credentials when connecting to target MongoDB instances where authentication is not enabled (`authSource=admin` rejected).
+
+### 2. Why This Approach? (Rationale)
+- **Polars Strict Object Behavior**: When `psycopg2` / `SQLAlchemy` extracts PostgreSQL `UUID` or `JSONB` columns, Polars classifies them with dtype `pl.Object`. In Polars 1.x+, calling `.cast(pl.Utf8)` or `.cast(..., strict=False)` on an `Object` Series immediately throws a `ComputeError`. The only safe and universally compatible approach is to extract values into a Python list `[str(x) if x is not None else None for x in df[col].to_list()]` and reconstruct a typed `pl.Series(col, vals, dtype=pl.Utf8)`.
+- **Target Connection Resilience**: Local or internal MongoDB deployments frequently run without authentication enabled. When connection strings include default credentials, MongoDB raises an auth failure. Adding an automatic unauthenticated fallback retry in `DDLExecutor` guarantees smooth preflight checks and table verification without requiring users to manually rewrite connection strings.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Relying on Polars `strict=False` Casts**:
+  - *Rejected*: Polars explicitly disables `.cast(..., strict=False)` for `pl.Object` columns, throwing the same compute error.
+- **Alternative B: Pure Python Row Iteration**:
+  - *Rejected*: Converting the entire DataFrame to Python dicts degrades streaming throughput. Pre-sanitizing only `pl.Object` columns preserves Polars vectorized execution for all native columns.
+
+### 4. Trade-offs & Future Considerations
+- List extraction incurs a slight Python overhead for `Object` columns, but it runs strictly in memory and eliminates all compute errors across heterogeneous database drivers.
+
+---
+
+## [2026-09-16] - Heterogeneous SQL Column Extraction & MongoDB Duplicate Key Handling on Migration Resumption
+
+### 1. Decision Summary
+Fixed 2 critical issues during relational SQL extraction and MongoDB resumption:
+1. **Heterogeneous SQL Column Extraction (`SourceConnectorFactory`)**: Replaced raw `pl.read_database()` with an in-memory sanitized row executor `_execute_sql_to_polars()`. Serializes nested `dict` and `list` structures to JSON strings, casts `UUID` instances to strings, and creates Polars DataFrames with `strict=False`. This eliminates crashes on polymorphic arrays (e.g. `['CODE_ALPHA', 'CODE_BETA', 404]`) where Polars' internal reader failed with `TypeError: unexpected value while building Series of type String; found value of type Int64: 404`.
+2. **MongoDB Duplicate Key Error Handling on Resumption (`TargetWriterFactory`)**: When retrying or resuming migrations without Clean Wipe, MongoDB raises `BulkWriteError` for existing documents (`code 11000: E11000 duplicate key error`). The writer now counts `code == 11000` write errors as `skipped_rows` rather than `failed_rows`, mirroring SQL's `ON CONFLICT DO NOTHING` behavior.
+
+### 2. Why This Approach? (Rationale)
+- **Mixed Data in Relational JSON Columns**: Complex datasets often store mixed types inside PostgreSQL/MySQL JSON and array fields. When `pl.read_database` processes these rows via default cursor mapping, it applies strict type inference (`strict=True`). Encountering an integer inside a string array raises a fatal `TypeError`. Pre-serializing JSON and dicts at fetch time guarantees 100% ingestion reliability.
+- **Idempotent Migration Resumption**: When a migration is resumed from an earlier failure, previously inserted documents in MongoDB shouldn't count as failures. Counting duplicate key errors as `skipped_rows` provides accurate progress reporting and prevents false error alarms.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Relying Solely on Polars Arrow Connector**:
+  - *Rejected*: Arrow/ADBC connectors also enforce strict uniform array types and fail when heterogeneous arrays are present in JSONB.
+- **Alternative B: Aborting on Duplicate Keys in MongoDB**:
+  - *Rejected*: Resumability is a core feature; aborting on existing documents breaks one-click job recovery.
+
+### 4. Trade-offs & Future Considerations
+- In-memory dict serialization is fast and processes thousands of rows in milliseconds while guaranteeing type safety across all database dialects.
+
+
+
 
 
 

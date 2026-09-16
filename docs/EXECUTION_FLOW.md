@@ -889,6 +889,84 @@
 - **[MODIFIED]**: [`apps/web/components/plans/PlanExecuteTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanExecuteTab.tsx) — Replaced action buttons with locked badge when migration is completed.
 - **[UNCHANGED]**: Backend API execution services, schema catalog, Docker Agent execution engine.
 
+---
+
+# Execution Flow — Polars Object Type Sanitization & Target Engine Hardening
+
+## 1. Entry Point
+- **Files**:
+  - [`apps/agent/engine/connectors/source_factory.py:SourceConnectorFactory.read_source_chunk()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/connectors/source_factory.py)
+  - [`apps/agent/engine/transformers/ast_transformer.py:ASTTransformer.transform_chunk()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py)
+  - [`apps/agent/engine/ddl_executor.py:DDLExecutor._ensure_database_exists()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/ddl_executor.py)
+- **Trigger**:
+  - Docker Agent pulls an execution job migrating PostgreSQL source data with native `UUID` or `JSONB` columns to target database (PostgreSQL, MySQL, MongoDB).
+
+## 2. Step-by-Step Execution Sequence
+
+### 1. Source Chunk Extraction & Early Object Sanitization
+1. **Database Extraction**: `SourceConnectorFactory.read_source_chunk()` executes SQL query using `pl.read_database()`.
+2. **Object Detection**: Scans DataFrame columns for `col_dtype == pl.Object` (e.g., Python `uuid.UUID` or `dict` objects returned by `psycopg2`).
+3. **String Coercion**: Extracts column to Python list via `[str(x) if x is not None else None for x in df[col].to_list()]` and rebuilds `pl.Series(col, vals, dtype=pl.Utf8)`.
+
+### 2. AST Transformation & Vectorized Expressions
+1. **Entry Normalization**: At the start of `ASTTransformer.transform_chunk()`, checks `df.schema` for any remaining `pl.Object` columns and converts them safely to `pl.Utf8`.
+2. **Primary Key Strategies (`prefix_id` & `uuid_v5`)**:
+   - Instead of calling `.cast(pl.Utf8)` on source series, extracts strings using `[str(v) if v is not None else "" for v in df[col].to_list()]`.
+   - Computes deterministic UUIDv5 strings using `uuid.uuid5(uuid.NAMESPACE_DNS, f"{seed_prefix}_{val}")`.
+3. **Target Formatting**:
+   - For MongoDB targets, converts UUID strings to native strings, promotes `id` to `_id`, and packs residual fields into JSON structures.
+
+### 3. Target DDL & Connection Verification Fallback
+1. **Target Preflight Check**: `DDLExecutor` attempts connection to target MongoDB via `MongoClient`.
+2. **Unauthenticated Fallback**: If an authentication error (`OperationFailure: Authentication failed`) occurs, strips credentials from the URL and reconnects cleanly to unauthenticated instances.
+
+## 3. Impact & Delta Analysis
+- **[MODIFIED]**: [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py) — Added early `pl.Object` normalization and list-comprehension string extraction for `prefix_id` and `uuid_v5`.
+- **[MODIFIED]**: [`apps/agent/engine/connectors/source_factory.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/connectors/source_factory.py) — Replaced raw `pl.read_database` with `_execute_sql_to_polars` handling heterogeneous JSON and arrays.
+- **[MODIFIED]**: [`apps/agent/engine/writers/target_writer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py) — Categorized MongoDB code 11000 duplicate keys as `skipped_rows` during migration resumption.
+- **[MODIFIED]**: [`apps/agent/engine/ddl_executor.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/ddl_executor.py) — Added unauthenticated fallback retry for MongoDB preflight and table count checks.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py) — Added `SCHEMA_POLARS_TYPE_ERROR` failure classification rule.
+
+---
+
+# Execution Flow — Heterogeneous SQL Column Extraction & MongoDB Resumption
+
+## 1. Entry Point
+- **Files**:
+  - [`apps/agent/engine/connectors/source_factory.py:SourceConnectorFactory.read_source_chunk()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/connectors/source_factory.py)
+  - [`apps/agent/engine/writers/target_writer.py:TargetWriterFactory.bulk_load()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py)
+- **Trigger**:
+  - Migration job extracts SQL source tables containing mixed-type arrays or JSON objects (e.g., `polymorphic_event_bus`) and streams to MongoDB targets.
+
+## 2. Step-by-Step Execution Sequence
+
+### 1. In-Memory Sanitized SQL Cursor Extraction (`_execute_sql_to_polars`)
+1. **Query Execution**: Executes `SELECT * FROM table ...` via SQLAlchemy connection.
+2. **Row Sanitization**:
+   - Encounters polymorphic types (e.g. `['CODE_ALPHA', 'CODE_BETA', 404]`).
+   - Converts `dict` and `list` structures to JSON strings (`json.dumps(val, default=str)`).
+   - Converts `uuid.UUID` to string and binary bytes to decoded UTF-8/hex strings.
+3. **DataFrame Instantiation**: Creates Polars DataFrame using `pl.DataFrame(cleaned_rows, strict=False)`, preventing Series construction `TypeError` exceptions.
+4. **Object Dtype Normalization**: Ensures any remaining `pl.Object` columns are normalized to `pl.Utf8`.
+
+### 2. AST Transformation & Primary Key Generation
+1. `ASTTransformer.transform_chunk()` processes mapped columns with `keep_original`, `prefix_id`, or `uuid_v5` primary key strategies.
+2. Captures unmapped residual fields into `extra_attributes`.
+
+### 3. MongoDB Idempotent Bulk Insertion
+1. Transformed documents are sent to MongoDB via `collection.insert_many(rows, ordered=False)`.
+2. When resuming a previously interrupted job:
+   - Existing documents raise `BulkWriteError` with error `code: 11000` (`duplicate key`).
+   - `TargetWriterFactory` filters `code == 11000` into `skipped_rows` and calculates `actual_failures = len(write_errors) - duplicate_skips`.
+   - Migration completes successfully with accurate row counts.
+
+## 3. Impact & Delta Analysis
+- **[MODIFIED]**: [`apps/agent/engine/connectors/source_factory.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/connectors/source_factory.py) — In-memory sanitized SQL cursor extraction.
+- **[MODIFIED]**: [`apps/agent/engine/writers/target_writer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py) — MongoDB duplicate key classification as `skipped_rows`.
+- **[MODIFIED]**: [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py) — Updated object cleanup in fallback pass-through.
+
+
+
 
 
 

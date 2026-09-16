@@ -680,6 +680,14 @@ class ExecutionService:
                 "Review agent logs for underlying database driver notices and errors (e.g. missing target table or column type mismatch).",
                 "Ensure target tables are created prior to streaming and re-run the job."
             ]
+        elif "cannot cast 'object' type" in err_lower or "computerror: cannot cast" in err_lower:
+            category = "SCHEMA_POLARS_TYPE_ERROR"
+            user_env_issue = False
+            diag_summary = f"Polars columnar transformation encountered unconverted Python Object/UUID columns in table '{tbl}'."
+            fix_steps = [
+                "Ensure source database driver columns (UUID/JSON) are sanitized to string before Polars cast operations.",
+                "Re-run migration using updated Docker Agent image (data-migration-agent:latest)."
+            ]
         else:
             diag_summary = f"ETL pipeline encountered an unexpected error during stage '{stage}': {err_msg[:200]}"
             fix_steps = [

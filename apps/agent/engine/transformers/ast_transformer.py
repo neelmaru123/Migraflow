@@ -123,6 +123,14 @@ class ASTTransformer:
         if df.is_empty():
             return df, 0
 
+        # Sanitize any Polars Object dtypes (e.g. UUID objects from psycopg2, custom Python objects)
+        # to Utf8 strings so that .cast(pl.Utf8), expressions, and downstream mappings operate seamlessly.
+        if any(dt == pl.Object for dt in df.schema.values()):
+            for c, dt in df.schema.items():
+                if dt == pl.Object:
+                    vals = [str(x) if x is not None else None for x in df[c].to_list()]
+                    df = df.with_columns(pl.Series(c, vals, dtype=pl.Utf8))
+
         exprs = []
         keep_columns = []
         row_errors = 0
@@ -291,7 +299,7 @@ class ASTTransformer:
                             pk_expr = pl.Series(pk_list)
                         elif pk_strategy == "prefix_id":
                             _sid = src_ident  # capture for closure
-                            _col_vals = df[src_name].cast(pl.Utf8).to_list()
+                            _col_vals = [str(v) if v is not None else None for v in df[src_name].to_list()]
                             pk_list = [
                                 f"{_sid}_{v}" if v not in (None, "") else _deterministic_fallback_uuid(retry_seed_prefix, row_offset + i)
                                 for i, v in enumerate(_col_vals)
@@ -300,7 +308,7 @@ class ASTTransformer:
                         else:
                             # Default: deterministic UUID v5
                             _sid = src_ident
-                            _col_vals = df[src_name].cast(pl.Utf8).to_list()
+                            _col_vals = [str(v) if v is not None else None for v in df[src_name].to_list()]
                             pk_list = [
                                 str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{_sid}_{v}")) if v not in (None, "")
                                 else _deterministic_fallback_uuid(retry_seed_prefix, row_offset + i)
@@ -719,7 +727,8 @@ class ASTTransformer:
                 def _clean_objects(dframe: pl.DataFrame) -> pl.DataFrame:
                     for col_n, dt in dframe.schema.items():
                         if dt == pl.Object:
-                            dframe = dframe.with_columns(pl.col(col_n).cast(pl.Utf8, strict=False))
+                            vals = [str(x) if x is not None else None for x in dframe[col_n].to_list()]
+                            dframe = dframe.with_columns(pl.Series(col_n, vals, dtype=pl.Utf8))
                     return dframe
 
                 available_targets = [c for c in keep_columns if c in transformed_df.columns]
@@ -740,7 +749,8 @@ class ASTTransformer:
                 fallback_df = df.select(available_targets) if available_targets else df
                 for col_n, dt in fallback_df.schema.items():
                     if dt == pl.Object:
-                        fallback_df = fallback_df.with_columns(pl.col(col_n).cast(pl.Utf8, strict=False))
+                        vals = [str(x) if x is not None else None for x in fallback_df[col_n].to_list()]
+                        fallback_df = fallback_df.with_columns(pl.Series(col_n, vals, dtype=pl.Utf8))
                 return fallback_df, row_errors
 
         # Passthrough: ensure 'id' exists even with no expressions
@@ -752,5 +762,6 @@ class ASTTransformer:
         pass_df = df.select(available_targets) if available_targets else df
         for col_n, dt in pass_df.schema.items():
             if dt == pl.Object:
-                pass_df = pass_df.with_columns(pl.col(col_n).cast(pl.Utf8, strict=False))
+                vals = [str(x) if x is not None else None for x in pass_df[col_n].to_list()]
+                pass_df = pass_df.with_columns(pl.Series(col_n, vals, dtype=pl.Utf8))
         return pass_df, row_errors

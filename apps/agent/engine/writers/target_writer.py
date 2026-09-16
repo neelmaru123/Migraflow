@@ -202,14 +202,16 @@ class TargetWriterFactory:
                 if is_bulk_err or (hasattr(exc, "details") and isinstance(getattr(exc, "details"), dict)):
                     details = getattr(exc, "details", {})
                     write_errors = details.get("writeErrors", [])
-                    failed_rows = len(write_errors)
-                    n_inserted = details.get("nInserted", len(rows) - failed_rows)
+                    duplicate_skips = sum(1 for err in write_errors if err.get("code") == 11000)
+                    failed_rows = len(write_errors) - duplicate_skips
+                    n_inserted = details.get("nInserted", 0)
                     successful_rows = max(0, n_inserted)
+                    skipped_rows = duplicate_skips
                     logger.warning(
                         f"MongoDB partial bulk insert notice for collection '{table_name}': "
-                        f"{successful_rows} successful, {failed_rows} failed."
+                        f"{successful_rows} successful, {failed_rows} failed, {skipped_rows} skipped (duplicate keys)."
                     )
-                    return successful_rows, failed_rows, 0
+                    return successful_rows, failed_rows, skipped_rows
 
                 logger.error(f"MongoDB bulk insert error for collection '{table_name}': {exc}")
                 return 0, len(rows), 0
