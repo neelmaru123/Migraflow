@@ -852,7 +852,43 @@
 - **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_engine/migration_plans_llm.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_engine/migration_plans_llm.py) — Enforced `gen_random_uuid()` rule in LLM prompt.
 - **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py) — Sanitized DDL responses on plan detail fetch.
 - **[MODIFIED]**: [`apps/api/app/modules/execution/execution_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py) — Added specific diagnostic categories for SQL dialect and table errors.
-- **[UNCHANGED]**: Database schemas, Alembic migrations, frontend Next.js components.
+- **[UNCHANGED]**: Database schemas, Alembic migrations.
+
+---
+
+# Execution Flow — Post-Migration UI Lifecycle & Re-Execution Prevention
+
+## 1. Entry Point
+- **Files**:
+  - [`apps/web/app/execution/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/execution/page.tsx)
+  - [`apps/web/components/plans/PlanExecuteTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanExecuteTab.tsx)
+  - [`apps/web/components/plans/JobExecutionBanner.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/JobExecutionBanner.tsx)
+- **Trigger**:
+  - User visits `/execution` or `/transformation-plan?tab=execute` after a real migration job reaches status `completed`.
+
+## 2. Step-by-Step Execution Sequence
+
+### 1. Execution Monitor Lifecycle (`/execution`)
+1. **Job List Query**: `fetchExecutions()` fetches all user jobs from `GET /api/v1/execution/jobs`.
+2. **Action Header Sanitization**: Top header presents only the `Refresh Jobs` action. The previous duplicate `+ Create New Migration` button is removed.
+3. **Selected Job Banner**: Renders `JobExecutionBanner` for the selected job. When `isRealCompleted === true`, secondary generation links are stripped.
+
+### 2. Transformation Blueprint Execution Tab (`/transformation-plan?tab=execute`)
+1. **Plan & Job State Inspection**: `PlanExecuteTab` computes `isMigrationCompleted = Boolean((activeJob && activeJob.status === 'completed' && !activeJob.is_dry_run) || plan.status === 'completed')`.
+2. **Action Gate Enforcement**:
+   - If `isMigrationCompleted === true`:
+     - Hides the interactive `Dry Run` and `Approve & Execute Migration` buttons.
+     - Renders a persistent `MIGRATION EXECUTED & LOCKED` safety badge (`CheckCircle2`).
+     - Updates the explanatory heading to reflect that all records have been committed and the agent is locked against further generation.
+   - If `isMigrationCompleted === false`:
+     - Renders the `⚡ Run Dry Run (Simulation)` and `APPROVE & EXECUTE MIGRATION` buttons for active/pending plans.
+
+## 3. Impact & Delta Analysis
+- **[MODIFIED]**: [`apps/web/app/execution/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/execution/page.tsx) — Removed `+ Create New Migration` button from header.
+- **[MODIFIED]**: [`apps/web/components/plans/JobExecutionBanner.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/JobExecutionBanner.tsx) — Removed post-completion `Create New Migration` button.
+- **[MODIFIED]**: [`apps/web/components/plans/PlanExecuteTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanExecuteTab.tsx) — Replaced action buttons with locked badge when migration is completed.
+- **[UNCHANGED]**: Backend API execution services, schema catalog, Docker Agent execution engine.
+
 
 
 

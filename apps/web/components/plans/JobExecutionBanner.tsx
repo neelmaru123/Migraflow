@@ -403,17 +403,6 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
               </button>
             )}
 
-            {/* Completed Job: Offer "Create New Migration" */}
-            {isRealCompleted && (
-              <Link
-                href="/profiling"
-                className="h-10 px-4 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider border border-sky-400 shadow-md hover:shadow-sky-400/20 transition-all font-mono inline-flex items-center gap-1.5"
-              >
-                <span>+</span>
-                <span>Create New Migration</span>
-              </Link>
-            )}
-
             {/* Re-run Button for Cancelled Jobs */}
             {isCancelled && (
               <button

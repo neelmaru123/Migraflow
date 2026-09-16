@@ -154,7 +154,7 @@ export const PlanExecuteTab: React.FC<PlanExecuteTabProps> = ({
               </span>
             </div>
             <p className="text-zinc-300 font-sans text-xs leading-relaxed">
-              This blueprint has already executed and populated your target database. To re-run the migration or append new records, ensure your Docker Agent container is running before clicking below.
+              This blueprint has already executed and populated your target database. To maintain target data integrity, this agent and blueprint are locked against further migration generation.
             </p>
           </div>
         </div>
@@ -166,73 +166,78 @@ export const PlanExecuteTab: React.FC<PlanExecuteTabProps> = ({
           <div>
             <h4 className="text-sm font-bold text-white uppercase tracking-wider font-sans">
               {isMigrationCompleted
-                ? 'Migration Completed (Optional Re-Run)'
+                ? 'Migration Execution Complete & Locked'
                 : 'Approve Blueprint & Run Local Agent Migration'}
             </h4>
             <p className="text-xs text-zinc-400 font-mono mt-0.5">
               {isMigrationCompleted
-                ? 'All records have been streamed. Re-executing will re-stream data into your target database.'
+                ? 'All records have been streamed into the target database. Execution is locked for this agent to prevent duplicate migrations.'
                 : 'Approving locks the blueprint AST and dispatches the stream execution job to your Docker Agent.'}
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3">
-            {/* Dry Run Button */}
-            <button
-              type="button"
-              onClick={onDryRun}
-              disabled={
-                isDryRunning ||
-                isApproving ||
-                isJobActive ||
-                isRefining ||
-                plan.status === 'refining' ||
-                !plan.is_valid
-              }
-              className="py-3.5 px-6 rounded-none text-xs font-bold font-mono uppercase tracking-wider transition-all border border-amber-400/50 bg-amber-400/10 hover:bg-amber-400/20 text-amber-300 shadow-lg disabled:opacity-50"
-            >
-              {isDryRunning ? 'Simulating Dry Run...' : '⚡ Run Dry Run (Simulation)'}
-            </button>
+          {isMigrationCompleted ? (
+            <div className="flex items-center gap-2 px-4 py-2.5 bg-emerald-950/40 border border-emerald-500/40 text-emerald-300 font-mono text-xs shadow-sm">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span className="font-bold uppercase tracking-wider">
+                MIGRATION EXECUTED & LOCKED
+              </span>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-3">
+              {/* Dry Run Button */}
+              <button
+                type="button"
+                onClick={onDryRun}
+                disabled={
+                  isDryRunning ||
+                  isApproving ||
+                  isJobActive ||
+                  isRefining ||
+                  plan.status === 'refining' ||
+                  !plan.is_valid
+                }
+                className="py-3.5 px-6 rounded-none text-xs font-bold font-mono uppercase tracking-wider transition-all border border-amber-400/50 bg-amber-400/10 hover:bg-amber-400/20 text-amber-300 shadow-lg disabled:opacity-50"
+              >
+                {isDryRunning ? 'Simulating Dry Run...' : '⚡ Run Dry Run (Simulation)'}
+              </button>
 
-            {/* Real Approve & Execute Button */}
-            <button
-              type="button"
-              onClick={onOpenExecutionModal}
-              disabled={
-                isApproving ||
-                isJobActive ||
-                isDryRunning ||
-                isRefining ||
-                plan.status === 'refining' ||
-                !plan.is_valid
-              }
-              className={`py-3.5 px-8 rounded-none text-xs font-bold font-mono uppercase tracking-wider transition-all shadow-lg ${
-                !plan.is_valid
-                  ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed border border-zinc-700'
-                  : isJobActive
-                  ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed border border-zinc-700'
-                  : isMigrationCompleted
-                  ? 'bg-zinc-900 hover:bg-zinc-800 text-emerald-400 border border-emerald-500/50 hover:border-emerald-400 shadow-emerald-950/30'
+              {/* Real Approve & Execute Button */}
+              <button
+                type="button"
+                onClick={onOpenExecutionModal}
+                disabled={
+                  isApproving ||
+                  isJobActive ||
+                  isDryRunning ||
+                  isRefining ||
+                  plan.status === 'refining' ||
+                  !plan.is_valid
+                }
+                className={`py-3.5 px-8 rounded-none text-xs font-bold font-mono uppercase tracking-wider transition-all shadow-lg ${
+                  !plan.is_valid
+                    ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed border border-zinc-700'
+                    : isJobActive
+                    ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed border border-zinc-700'
+                    : isApproved
+                    ? 'bg-emerald-500 hover:bg-emerald-400 text-black shadow-emerald-950/50 hover:scale-[1.01]'
+                    : 'bg-sky-400 hover:bg-sky-300 text-black shadow-sky-950/50 hover:scale-[1.01]'
+                } disabled:opacity-50`}
+              >
+                {isJobActive
+                  ? 'EXECUTION IN PROGRESS...'
+                  : isApproving
+                  ? 'Executing on Agent...'
+                  : isRefining || plan.status === 'refining'
+                  ? 'REFINEMENT IN PROGRESS...'
+                  : !plan.is_valid
+                  ? 'EXECUTION BLOCKED (INVALID PLAN)'
                   : isApproved
-                  ? 'bg-emerald-500 hover:bg-emerald-400 text-black shadow-emerald-950/50 hover:scale-[1.01]'
-                  : 'bg-sky-400 hover:bg-sky-300 text-black shadow-sky-950/50 hover:scale-[1.01]'
-              } disabled:opacity-50`}
-            >
-              {isJobActive
-                ? 'EXECUTION IN PROGRESS...'
-                : isApproving
-                ? 'Executing on Agent...'
-                : isRefining || plan.status === 'refining'
-                ? 'REFINEMENT IN PROGRESS...'
-                : !plan.is_valid
-                ? 'EXECUTION BLOCKED (INVALID PLAN)'
-                : isMigrationCompleted
-                ? '⚡ RE-RUN MIGRATION'
-                : isApproved
-                ? '⚡ EXECUTE MIGRATION'
-                : 'APPROVE & EXECUTE MIGRATION'}
-            </button>
-          </div>
+                  ? '⚡ EXECUTE MIGRATION'
+                  : 'APPROVE & EXECUTE MIGRATION'}
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Safety Note */}

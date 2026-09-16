@@ -1571,5 +1571,33 @@ Fixed 5 systemic migration and execution engine failures during complex NoSQL-to
 ### 4. Trade-offs & Future Considerations
 - Coercing unrecognized string statuses to `False` satisfies `BOOLEAN NOT NULL` constraints while the original raw polymorphic values are preserved in the JSON catch-all column (`extra_attributes`).
 
+---
+
+## [2026-09-16] - Prevention of Duplicate Migration Generation & Execution Post-Completion
+
+### 1. Decision Summary
+Disabled and removed migration generation/execution trigger buttons across the platform UI once an agent has executed a real migration job:
+1. **Execution Page Header (`apps/web/app/execution/page.tsx`)**: Removed the `+ Create New Migration` button from the top navigation header.
+2. **Job Execution Banner (`apps/web/components/plans/JobExecutionBanner.tsx`)**: Removed the post-completion `Create New Migration` button that appeared upon job completion (`isRealCompleted`).
+3. **Plan Execute Tab (`apps/web/components/plans/PlanExecuteTab.tsx`)**: When a migration job is completed (`isMigrationCompleted`), the execution control section hides the `Dry Run (Simulation)` and `Approve & Execute / Re-Run Migration` buttons, replacing them with a persistent `MIGRATION EXECUTED & LOCKED` safety status indicator.
+4. **Advisory Text Alignment**: Updated helper copy on the execute tab to clarify that migration generation is locked for executed agents to preserve target database data integrity.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**:
+  - Previously, after a real migration job completed successfully, the UI continued to display clickable "Re-Run Migration" and "Create New Migration" buttons on the execution page and transformation blueprint page (`tab=execute`).
+  - Clicking these buttons caused duplicate job dispatches, orphaned background tasks, and confusion over whether an agent can run multiple migrations.
+- **Chosen Solution**:
+  - Enforced a strict single-migration lifecycle per agent in the UI: once a migration job completes (`status === 'completed'` on real run), the action buttons are replaced with a locked badge.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Allowing Unbounded Re-Runs on Same Target**:
+  - *Rejected*: Re-running without explicit target resets causes duplicate key violations, primary key collision errors, and corrupts target relational state.
+- **Alternative B: Simple Button Disabling without Explanation**:
+  - *Rejected*: Leaving grayed-out buttons without explanatory text leads to user confusion. Replacing buttons with a prominent `MIGRATION EXECUTED & LOCKED` card provides clear context.
+
+### 4. Trade-offs & Future Considerations
+- If users wish to migrate different source schemas or re-execute migrations with updated configurations, they should register a fresh agent instance. Future enhancements can provide an explicit "Clone Agent & Create New Plan" workflow if multi-run testing is required.
+
+
 
 

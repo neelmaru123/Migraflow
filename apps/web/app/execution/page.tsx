@@ -89,12 +89,6 @@ export default function ExecutionPage() {
           </div>
 
           <div className="flex items-center gap-3">
-            <Link
-              href="/profiling"
-              className="py-3 px-5 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-mono font-bold uppercase tracking-wider transition-colors shadow-lg flex items-center gap-2"
-            >
-              <span>+ Create New Migration</span>
-            </Link>
             <button
               type="button"
               onClick={() => fetchExecutions()}
