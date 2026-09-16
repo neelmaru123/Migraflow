@@ -742,3 +742,117 @@
 - **[NEW]**: [`PlanTableMappingsTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanTableMappingsTab.tsx) — Searchable/filterable schema mapping matrix and AST editor.
 - **[NEW]**: [`PlanExecuteTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanExecuteTab.tsx) — Execution readiness gate, job banner, dry run, and execution dispatch.
 - **[MODIFIED]**: [`PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) — Refactored to act as central state and business logic orchestrator.
+
+---
+
+# Execution Flow — Post-Migration Container Lifecycle & Safe Re-Execution Guard
+
+## 1. Entry Point
+- **Files**:
+  - [`apps/api/app/modules/execution/execution_services.py:start_plan_execution()`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py)
+  - [`apps/web/components/plans/PlanExecuteTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanExecuteTab.tsx)
+  - [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx)
+- **Triggers**:
+  - Completion of a migration job followed by container shutdown (Option A).
+  - User clicking the secondary execution action in `PlanExecuteTab` after a previous run completed.
+  - Periodic background watchdog scan (`stale_agent_watchdog` in `app/main.py`).
+
+## 2. Step-by-Step Execution Sequence
+
+### 1. Job Completion & Graceful Container Shutdown (Option A)
+1. **Completion Signal**: Docker Agent finishes streaming target records and reports `status = "completed"` to `POST /api/v1/execution/jobs/{job_id}/progress`.
+2. **Shutdown Directive**: On the next heartbeat ping, `process_agent_heartbeat()` identifies a recently completed job (`<= 120s`) and issues action directive `SHUTDOWN`.
+3. **Agent Clean Exit**: Docker Agent logs `[OPTION A] Backend issued SHUTDOWN directive`, sends final heartbeat with `status = "offline"`, and terminates process with `sys.exit(0)`.
+4. **Database State**: Agent record in PostgreSQL retains `status = "offline"`, `last_error = None`, `error_category = None`.
+
+### 2. Frontend Completion Recognition & Re-Run UX
+1. **State Evaluation**: `PlanExecuteTab.tsx` evaluates `isMigrationCompleted = Boolean((activeJob && activeJob.status === 'completed' && !activeJob.is_dry_run) || plan.status === 'completed')`.
+2. **Success Callout**: Renders green `Target Migration Completed Successfully` card confirming all target tables were written.
+3. **Action Re-labeling**: The primary action button transitions to `⚡ RE-RUN MIGRATION` with distinct secondary styling rather than presenting an ambiguous pending state.
+4. **Safety Confirmation Modal**: Clicking opens `PlanBlueprintViewer.tsx` modal which warns that the migration has already completed once and advises considering Clean Wipe to prevent duplicate records.
+
+### 3. Backend Offline Protection & Watchdog Safety
+1. **Execution Gate**: When `POST /api/v1/plans/{plan_id}/execute` is received, `ExecutionService.start_plan_execution()` inspects the assigned agent.
+2. **Status Guard**: Checks `if agent.status in ("error", "offline")` alongside `last_seen_at < cutoff`. Even if the agent container shut down seconds ago, the `"offline"` status immediately triggers HTTP `503 Service Unavailable` with a descriptive message prompting the user to start the container.
+3. **Preserved State**: `ExecutionService` clears `idle_since` but **never** forcibly mutates `agent.status = "online"`. Only a verified incoming heartbeat from a running container can restore online status.
+4. **Watchdog Neutrality**: The 20-second `stale_agent_watchdog` only scans agents whose status is actively in `["online", "busy", "degraded"]`. Cleanly offline agents are skipped, preventing false-positive `FATAL STOPPING ERROR [DISCONNECTED UNEXPECTEDLY]` alarms.
+
+## 3. Impact & Delta Analysis
+- **[MODIFIED]**: [`execution_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py) — Added `agent.status in ("error", "offline")` gate and removed forced online mutation on offline agents.
+- **[MODIFIED]**: [`PlanExecuteTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanExecuteTab.tsx) — Added `isMigrationCompleted` success callout, re-run button state, and secondary styling.
+- **[MODIFIED]**: [`PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) — Added re-run context warning in execution confirmation modal.
+- **[UNCHANGED]**: Agent container daemon, Docker compose configuration, database models, and Alembic migrations.
+
+---
+
+# Execution Flow — Complex NoSQL Database Provisioning (`complex_nosql_enterprise`)
+
+## 1. Entry Point
+- **File**: [`scripts/seed_complex_nosql.py`](file:///d:/GitHub/Ai_data_migration_platform/scripts/seed_complex_nosql.py)
+- **Trigger**: CLI invocation via `poetry run python ../../scripts/seed_complex_nosql.py` or automated benchmark testing harness.
+
+## 2. Step-by-Step Execution Sequence
+1. **Connection & Teardown**:
+   - Connects to local MongoDB daemon on `mongodb://localhost:27017/`.
+   - Calls `client.drop_database("complex_nosql_enterprise")` to guarantee an idempotent fresh schema state.
+2. **Phase 1: Deep Hierarchy & GeoSpatial (`smart_iot_fleet`)**:
+   - Generates 150 documents with **Level 7 nested branches** (`root` $\rightarrow$ `architecture` $\rightarrow$ `subsystems.powertrain` $\rightarrow$ `control_unit` $\rightarrow$ `chamber_telemetry` $\rightarrow$ `manifold_nodes` $\rightarrow$ `calibration.active_compensation_matrix`).
+   - Generates GeoJSON `Point` objects with realistic coordinates across 5 international cities.
+   - Builds `2dsphere` spatial index and compound indexes on nested MCU serials.
+3. **Phase 2: Radical Schema Polymorphism (`omnichannel_customer_graph`)**:
+   - Generates 150 documents partitioned across 3 distinct personas: `ENTERPRISE_ORGANIZATION`, `INDIVIDUAL_CONSUMER`, and `ANONYMOUS_SESSION`.
+   - Implements dynamic type divergence on `compliance_clearance` (embedded dictionary, boolean flag, and string status).
+   - Generates sparse indexes on sub-document paths.
+4. **Phase 3: Multi-Dimensional Arrays & EHR Sub-Trees (`clinical_genomics_records`)**:
+   - Generates 120 clinical records with nested arrays containing arrays of 2D matrices (`exon_quality_matrix`) and unbounded phenotypic HPO code maps.
+5. **Phase 4: Dynamic Types & Native BSON (`polymorphic_event_bus`)**:
+   - Generates 200 telemetry events with mixed types for `payload.verification_code` (`int`, `str`, `dict`, `bool`, `list`) and native BSON `Regex` objects.
+
+## 3. Impact & Delta Analysis
+- **[NEW]**: [`scripts/seed_complex_nosql.py`](file:///d:/GitHub/Ai_data_migration_platform/scripts/seed_complex_nosql.py) — Standalone production-grade complex NoSQL database seeder.
+- **[UNCHANGED]**: Core API server, Next.js frontend, Docker agent execution engine.
+
+---
+
+# Execution Flow — NoSQL-to-Relational ETL Hardening & Polymorphic Coercion
+
+## 1. Entry Point
+- **Files**:
+  - [`apps/agent/engine/ddl_executor.py:DDLExecutor.execute_ddl()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/ddl_executor.py)
+  - [`apps/agent/engine/transformers/ast_transformer.py:ASTTransformer.transform()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py)
+  - [`apps/api/app/modules/execution/execution_services.py:ExecutionService.diagnose_failure()`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py)
+- **Trigger**:
+  - Agent task poller pulls an execution job from `GET /api/v1/agents/tasks`.
+  - Migration plan execution begins with Pre-Migration DDL creation and streaming chunk transformations.
+
+## 2. Step-by-Step Execution Sequence
+
+### 1. DDL Execution & Dialect Sanitization
+1. **Pre-Execution Sanitization**: `DDLExecutor._sanitize_sql()` strips invalid markdown fences and replaces non-standard dialect functions (e.g. `uuid_v4()` $\rightarrow$ `gen_random_uuid()` for PostgreSQL).
+2. **Execution Attempt**: Statement is dispatched to target database via SQLAlchemy engine connection.
+3. **Runtime Auto-Healing Retry**: If PostgreSQL returns `UndefinedFunctionError` mentioning `uuid_v4`, the executor catches the error, replaces `uuid_v4()` with `gen_random_uuid()`, and re-executes immediately.
+4. **Benign Error Filtering**: Non-fatal warnings (e.g. table already exists) are safely suppressed without masking critical table creation syntax errors.
+
+### 2. AST Transformation & Polars LazyFrame Processing
+1. **Column Disambiguation**: `ASTTransformer.transform()` inspects Polars expressions. Using `isinstance(item, pl.Expr)` and `item.meta.output_name()`, it identifies duplicate columns and merges explicitly mapped `extra_attributes` catch-all fields with unmapped residual fields into a unified expression.
+2. **Polymorphic Boolean Parsing**: For target columns defined as `BOOLEAN NOT NULL`, `_parse_bool()` coerces heterogeneous values:
+   - Booleans (`True`/`False`) pass through unchanged.
+   - Recognized string representations (`"true"`, `"1"`, `"yes"`, `"active"`) evaluate to `True`.
+   - Polymorphic strings (`"PENDING_..."`, `"UNVERIFIED"`) and dictionaries evaluate to `False` (or fallback default) satisfying `NOT NULL` constraints.
+3. **Nested Dot-Path Promotion**: When promoting nested NoSQL fields (e.g. `architecture.firmware_version`), `nosql_field_promote` traverses the nested JSON structure, unpacks sub-keys, and guarantees safe non-null fallback values.
+
+### 3. Target Loading & AI Error Diagnosis
+1. **Bulk Insertion**: Cleanly transformed Polars LazyFrames are written to target PostgreSQL tables in chunked bulk batches with zero row skips.
+2. **Post-Migration DDL**: Target indexes and constraints are created.
+3. **Observability**: If errors occur, `ExecutionService.diagnose_failure()` categorizes the issue into actionable diagnostic categories (`SQL_DIALECT_FUNCTION_ERROR`, `TARGET_TABLE_MISSING`, `HIGH_ROW_ERROR_RATE`) and suggests immediate fixes in the UI.
+
+## 3. Impact & Delta Analysis
+- **[MODIFIED]**: [`apps/agent/engine/ddl_executor.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/ddl_executor.py) — PostgreSQL DDL sanitization, auto-healing retry, and refined error suppression.
+- **[MODIFIED]**: [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py) — Polars LazyFrame expression name deduplication, `_parse_bool` polymorphic coercion, and nested dot-path extraction.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_engine/migration_plans_llm.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_engine/migration_plans_llm.py) — Enforced `gen_random_uuid()` rule in LLM prompt.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py) — Sanitized DDL responses on plan detail fetch.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py) — Added specific diagnostic categories for SQL dialect and table errors.
+- **[UNCHANGED]**: Database schemas, Alembic migrations, frontend Next.js components.
+
+
+

@@ -170,7 +170,7 @@ class ExecutionService:
             is_offline = False
             if not agent or not agent.last_seen_at:
                 is_offline = True
-            elif agent.status == "error":
+            elif agent.status in ("error", "offline"):
                 is_offline = True
             elif agent.last_seen_at.tzinfo is not None and agent.last_seen_at < cutoff_utc:
                 is_offline = True
@@ -179,9 +179,10 @@ class ExecutionService:
 
             if is_offline:
                 agent_name = agent.name if agent else "Assigned Agent"
+                status_detail = f" (status: '{agent.status}')" if agent and agent.status else ""
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=f"Cannot execute plan: {agent_name} is currently offline or unreachable. Ensure the agent Docker container is actively running on the host.",
+                    detail=f"Cannot execute plan: {agent_name} is currently offline or unreachable{status_detail}. Ensure the agent Docker container is actively running on the host.",
                 )
 
         # Reset idle_since: agent is now active with a new job
@@ -191,10 +192,6 @@ class ExecutionService:
             agent_for_reset = res_reset_idle.scalar_one_or_none()
             if agent_for_reset:
                 agent_for_reset.idle_since = None
-                if agent_for_reset.status == "offline":
-                    agent_for_reset.status = "online"
-                    agent_for_reset.last_error = None
-                    agent_for_reset.error_category = None
 
         # Check if target tables already contain rows (preflight check via snapshot)
         existing_data_warnings = await ExecutionService.check_target_tables_existing_data(
@@ -656,6 +653,32 @@ class ExecutionService:
             fix_steps = [
                 "Verify database usernames and passwords in container environment variables.",
                 "Ensure password placeholders like <SRC_SRC_DB_1_PASSWORD> are replaced with valid credentials."
+            ]
+        elif "undefinedtable" in err_lower or ("relation" in err_lower and "does not exist" in err_lower):
+            category = "TARGET_TABLE_MISSING"
+            user_env_issue = False
+            diag_summary = f"Target table '{tbl}' does not exist in target database because pre-migration DDL table creation failed or was skipped."
+            fix_steps = [
+                "Verify target DDL statements use valid SQL syntax for the target database engine (e.g. gen_random_uuid() on PostgreSQL).",
+                "Ensure pre-migration DDL statements execute without errors before starting data streaming.",
+                "Re-run migration with the updated agent image (data-migration-agent:latest) which auto-heals DDL function compatibility."
+            ]
+        elif "undefinedfunction" in err_lower or "function uuid_v4() does not exist" in err_lower or "function does not exist" in err_lower:
+            category = "SQL_DIALECT_FUNCTION_ERROR"
+            user_env_issue = False
+            diag_summary = f"Pre-migration DDL referenced an unsupported SQL function (e.g. uuid_v4() on PostgreSQL)."
+            fix_steps = [
+                "Use native PostgreSQL gen_random_uuid() or uuid_generate_v4() instead of uuid_v4().",
+                "Update agent container to auto-heal dialect functions and re-run the execution job."
+            ]
+        elif "error rate exceeded" in err_lower:
+            category = "HIGH_ROW_ERROR_RATE"
+            user_env_issue = False
+            diag_summary = f"ETL pipeline aborted for table '{tbl}' because over 50% of records failed insertion."
+            fix_steps = [
+                "Check target database schema constraints, data types, and primary key definitions.",
+                "Review agent logs for underlying database driver notices and errors (e.g. missing target table or column type mismatch).",
+                "Ensure target tables are created prior to streaming and re-run the job."
             ]
         else:
             diag_summary = f"ETL pipeline encountered an unexpected error during stage '{stage}': {err_msg[:200]}"

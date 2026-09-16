@@ -36,6 +36,21 @@ def _to_plan_detail_response(plan) -> PlanDetailResponse:
     if plan.validation_errors and isinstance(plan.validation_errors, dict):
         warnings = plan.validation_errors.get("warnings", [])
 
+    plan_data = plan.plan_data or {}
+    if isinstance(plan_data, dict) and "pre_migration_ddl" in plan_data:
+        import re
+        target_type = "postgresql"
+        if plan.target_config and isinstance(plan.target_config, dict):
+            target_type = plan.target_config.get("database_type", "postgresql").lower()
+        if "postgres" in target_type:
+            sanitized_ddl = []
+            for stmt in plan_data.get("pre_migration_ddl", []):
+                stmt_clean = re.sub(r'\bDEFAULT\s+(?:uuid_v4|uuidv4)\(\)', 'DEFAULT gen_random_uuid()', str(stmt), flags=re.IGNORECASE)
+                stmt_clean = re.sub(r'\b(?:uuid_v4|uuidv4)\(\)', 'gen_random_uuid()', stmt_clean, flags=re.IGNORECASE)
+                sanitized_ddl.append(stmt_clean)
+            plan_data = dict(plan_data)
+            plan_data["pre_migration_ddl"] = sanitized_ddl
+
     return PlanDetailResponse(
         id=plan.id,
         agent_id=plan.agent_id,
@@ -47,7 +62,7 @@ def _to_plan_detail_response(plan) -> PlanDetailResponse:
         validation_warnings=warnings,
         created_at=plan.created_at,
         updated_at=plan.updated_at,
-        plan_data=plan.plan_data,
+        plan_data=plan_data,
         target_config=plan.target_config,
         prompt_version=plan.prompt_version,
     )

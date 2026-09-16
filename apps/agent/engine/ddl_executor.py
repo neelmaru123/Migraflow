@@ -273,7 +273,22 @@ class DDLExecutor:
         cleaned = stmt.strip()
         url_lower = db_url.lower()
 
-        if "mysql" in url_lower:
+        if "postgres" in url_lower:
+            # Replace invalid uuid_v4() / uuidv4() function calls with native gen_random_uuid()
+            cleaned = re.sub(
+                r'\bDEFAULT\s+(?:uuid_v4|uuidv4)\(\)',
+                'DEFAULT gen_random_uuid()',
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+            cleaned = re.sub(
+                r'\b(?:uuid_v4|uuidv4)\(\)',
+                'gen_random_uuid()',
+                cleaned,
+                flags=re.IGNORECASE,
+            )
+
+        elif "mysql" in url_lower:
             # Strip PostgreSQL typecast operators e.g. ::jsonb, ::JSON, ::text
             cleaned = re.sub(r'::[a-zA-Z0-9_]+', '', cleaned, flags=re.IGNORECASE)
             # Convert PostgreSQL Array types e.g. TEXT[], VARCHAR(255)[], INT[] -> JSON
@@ -283,13 +298,13 @@ class DDLExecutor:
             # Convert MySQL invalid JSON/TEXT defaults e.g. DEFAULT '[]' -> DEFAULT ('[]')
             cleaned = re.sub(r"DEFAULT\s+'(\[\]|\{\})'", r"DEFAULT ('\1')", cleaned, flags=re.IGNORECASE)
             cleaned = re.sub(
-                r'\bUUID\s+PRIMARY\s+KEY\s+DEFAULT\s+(?:gen_random_uuid|uuid_generate_v4)\(\)',
+                r'\bUUID\s+PRIMARY\s+KEY\s+DEFAULT\s+(?:gen_random_uuid|uuid_generate_v4|uuid_v4|uuidv4)\(\)',
                 'VARCHAR(36) PRIMARY KEY',
                 cleaned,
                 flags=re.IGNORECASE,
             )
             cleaned = re.sub(
-                r'\bDEFAULT\s+(?:gen_random_uuid|uuid_generate_v4)\(\)',
+                r'\bDEFAULT\s+(?:gen_random_uuid|uuid_generate_v4|uuid_v4|uuidv4)\(\)',
                 '',
                 cleaned,
                 flags=re.IGNORECASE,
@@ -308,13 +323,13 @@ class DDLExecutor:
 
         elif "sqlite" in url_lower:
             cleaned = re.sub(
-                r'\bUUID\s+PRIMARY\s+KEY\s+DEFAULT\s+(?:gen_random_uuid|uuid_generate_v4)\(\)',
+                r'\bUUID\s+PRIMARY\s+KEY\s+DEFAULT\s+(?:gen_random_uuid|uuid_generate_v4|uuid_v4|uuidv4)\(\)',
                 'TEXT PRIMARY KEY',
                 cleaned,
                 flags=re.IGNORECASE,
             )
             cleaned = re.sub(
-                r'\bDEFAULT\s+(?:gen_random_uuid|uuid_generate_v4)\(\)',
+                r'\bDEFAULT\s+(?:gen_random_uuid|uuid_generate_v4|uuid_v4|uuidv4)\(\)',
                 '',
                 cleaned,
                 flags=re.IGNORECASE,
@@ -367,10 +382,38 @@ class DDLExecutor:
                 logger.info(f"Successfully executed DDL: {stmt_sanitized[:80]}...")
             except Exception as exc:
                 exc_str = str(exc).lower()
+
+                # Auto-healing for undefined uuid_v4() function on PostgreSQL / MySQL / SQLite
+                if "uuid_v4" in exc_str or "uuidv4" in exc_str:
+                    logger.info(f"Attempting DDL auto-healing for uuid_v4 in statement: '{stmt_sanitized[:80]}...'")
+                    try:
+                        import re
+                        healed_stmt = re.sub(
+                            r'\bDEFAULT\s+(?:uuid_v4|uuidv4)\(\)',
+                            'DEFAULT gen_random_uuid()',
+                            stmt_sanitized,
+                            flags=re.IGNORECASE,
+                        )
+                        healed_stmt = re.sub(
+                            r'\b(?:uuid_v4|uuidv4)\(\)',
+                            'gen_random_uuid()',
+                            healed_stmt,
+                            flags=re.IGNORECASE,
+                        )
+                        with engine.begin() as conn:
+                            conn.execute(text(healed_stmt))
+                        logger.info(f"Successfully auto-healed and executed DDL: {healed_stmt[:80]}...")
+                        continue
+                    except Exception as retry_exc:
+                        logger.warning(f"DDL auto-healing retry failed: {retry_exc}")
+                        exc = retry_exc
+                        exc_str = str(exc).lower()
+
+                # Benign warning keywords (MUST NOT contain 'if not exists', which would match the SQL text!)
                 benign_keywords = [
                     "already exists",
-                    "duplicate",
-                    "if not exists",
+                    "duplicate table",
+                    "duplicate column",
                     "multiple primary keys",
                     "foreignkeyviolation",
                     "foreign key constraint",
@@ -383,4 +426,5 @@ class DDLExecutor:
                 else:
                     logger.error(f"{stage_label} error for statement '{stmt_clean}': {exc}")
                     raise RuntimeError(f"{stage_label} failed for statement '{stmt_clean}': {exc}")
+
 

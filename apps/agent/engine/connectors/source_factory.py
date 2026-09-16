@@ -163,7 +163,10 @@ class SourceConnectorFactory:
 
                 next_pk = str(docs[-1]["_id"]) if (docs and "_id" in docs[-1]) else last_pk_val
                 cleaned_docs = [_sanitize_doc(d) for d in docs]
-                df = pl.DataFrame(cleaned_docs)
+                try:
+                    df = pl.DataFrame(cleaned_docs, strict=False)
+                except TypeError:
+                    df = pl.DataFrame(cleaned_docs)
                 has_more = len(df) == chunk_size
                 return df, has_more, next_pk
             except Exception as exc:

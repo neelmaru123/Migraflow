@@ -7,7 +7,7 @@ import {
 } from '../../types/migrationPlan';
 import { ExecutionJobResponse } from '../../types/execution';
 import JobExecutionBanner from './JobExecutionBanner';
-import { Database, AlertTriangle, ShieldCheck, Play, ArrowLeft, Layers, ShieldAlert, Sparkles } from 'lucide-react';
+import { Database, AlertTriangle, ShieldCheck, Play, ArrowLeft, Layers, ShieldAlert, Sparkles, CheckCircle2 } from 'lucide-react';
 
 interface PlanExecuteTabProps {
   plan: PlanDetailResponse;
@@ -37,6 +37,10 @@ export const PlanExecuteTab: React.FC<PlanExecuteTabProps> = ({
   onSwitchToOverviewTab,
 }) => {
   const isApproved = plan.status === 'completed' || plan.status === 'approved';
+  const isMigrationCompleted = Boolean(
+    (activeJob && activeJob.status === 'completed' && !activeJob.is_dry_run) ||
+    plan.status === 'completed'
+  );
   const tableCount = ast?.table_mappings?.length || 0;
 
   return (
@@ -136,15 +140,39 @@ export const PlanExecuteTab: React.FC<PlanExecuteTabProps> = ({
         />
       )}
 
+      {/* 3b. Migration Completed Success Callout */}
+      {isMigrationCompleted && (
+        <div className="p-4 bg-emerald-950/40 border border-emerald-500/50 text-xs font-mono flex items-start gap-3 shadow-[0_0_25px_rgba(16,185,129,0.15)] animate-fadeIn">
+          <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="font-bold text-emerald-300 uppercase tracking-wide text-xs">
+                Target Migration Completed Successfully
+              </span>
+              <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[10px] uppercase font-bold">
+                All Data Written
+              </span>
+            </div>
+            <p className="text-zinc-300 font-sans text-xs leading-relaxed">
+              This blueprint has already executed and populated your target database. To re-run the migration or append new records, ensure your Docker Agent container is running before clicking below.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* 4. Plan Approval & Agent Execution Action Section */}
       <div className="p-6 rounded-none bg-black border border-zinc-800 shadow-xl space-y-6">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-zinc-800 pb-4">
           <div>
             <h4 className="text-sm font-bold text-white uppercase tracking-wider font-sans">
-              Approve Blueprint & Run Local Agent Migration
+              {isMigrationCompleted
+                ? 'Migration Completed (Optional Re-Run)'
+                : 'Approve Blueprint & Run Local Agent Migration'}
             </h4>
             <p className="text-xs text-zinc-400 font-mono mt-0.5">
-              Approving locks the blueprint AST and dispatches the stream execution job to your Docker Agent.
+              {isMigrationCompleted
+                ? 'All records have been streamed. Re-executing will re-stream data into your target database.'
+                : 'Approving locks the blueprint AST and dispatches the stream execution job to your Docker Agent.'}
             </p>
           </div>
 
@@ -183,6 +211,8 @@ export const PlanExecuteTab: React.FC<PlanExecuteTabProps> = ({
                   ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed border border-zinc-700'
                   : isJobActive
                   ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed border border-zinc-700'
+                  : isMigrationCompleted
+                  ? 'bg-zinc-900 hover:bg-zinc-800 text-emerald-400 border border-emerald-500/50 hover:border-emerald-400 shadow-emerald-950/30'
                   : isApproved
                   ? 'bg-emerald-500 hover:bg-emerald-400 text-black shadow-emerald-950/50 hover:scale-[1.01]'
                   : 'bg-sky-400 hover:bg-sky-300 text-black shadow-sky-950/50 hover:scale-[1.01]'
@@ -196,6 +226,8 @@ export const PlanExecuteTab: React.FC<PlanExecuteTabProps> = ({
                 ? 'REFINEMENT IN PROGRESS...'
                 : !plan.is_valid
                 ? 'EXECUTION BLOCKED (INVALID PLAN)'
+                : isMigrationCompleted
+                ? '⚡ RE-RUN MIGRATION'
                 : isApproved
                 ? '⚡ EXECUTE MIGRATION'
                 : 'APPROVE & EXECUTE MIGRATION'}

@@ -1484,3 +1484,92 @@ Redesigned the `/transformation-plan` page from a flat, vertically unrolled 10+ 
 
 ### 4. Trade-offs & Future Considerations
 - Modularization into dedicated tab components (`PlanTabBar`, `PlanOverviewTab`, `PlanTableMappingsTab`, `PlanExecuteTab`) decouples UI rendering while `PlanBlueprintViewer` remains the central state orchestrator. Future enhancements can add per-table diff previews when comparing versions.
+
+---
+
+## [2026-09-16] - Agent Post-Migration Offline Guard & Re-Execution UX Hardening
+
+### 1. Decision Summary
+Resolved a multi-layered bug where an agent container, having gracefully exited following a successful migration under backend `SHUTDOWN` directives (Option A), was erroneously marked as having suffered a `FATAL STOPPING ERROR [DISCONNECTED UNEXPECTEDLY]`:
+1. **Backend Offline Gate**: Updated `execution_services.py:start_plan_execution()` to explicitly check `if agent.status in ("error", "offline")`, returning an immediate HTTP 503 rather than relying solely on `last_seen_at < cutoff` (which gave a false-positive availability signal within 60s of container exit).
+2. **Eliminated State Corruption**: Removed the forced mutation `agent_for_reset.status = "online"` inside `start_plan_execution()`, ensuring an offline Docker container cannot be falsely claimed active in the database.
+3. **Frontend Completion & Re-Run Disambiguation**: Updated `PlanExecuteTab.tsx` and `PlanBlueprintViewer.tsx` to detect completed migrations, render a dedicated "Target Migration Completed Successfully" success callout, label secondary execution actions as `⚡ RE-RUN MIGRATION` with muted styling, and provide re-run warnings in the confirmation modal.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**:
+  - After a successful migration, backend logic intentionally shuts down the agent container to conserve host resources.
+  - The UI's execute action section previously only checked `!isJobActive`. Because a completed job is inactive, the green `⚡ EXECUTE MIGRATION` button remained visible, leading the user to believe execution was still required.
+  - Clicking this button queued a new job, while the backend bypassed the offline check because `last_seen_at` was < 60 seconds old, and forcibly stamped the agent as `"online"`.
+  - When the user cancelled the stalled job, the background watchdog observed an agent marked `"online"` with no subsequent heartbeats, falsely declaring a `DISCONNECTED_UNEXPECTEDLY` fatal error on the dashboard.
+- **Chosen Solution**:
+  - Guard the backend entry point against any agent whose status is `"offline"` or `"error"`.
+  - Only allow authentic agent heartbeats to transition agent state to `"online"`.
+  - Explicitly indicate completion status on the UI so users clearly distinguish between initial execution and an optional re-run.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Disable Container Shutdown (Keep Agents Online Indefinitely)**:
+  - *Rejected*: In on-premise deployments, customer containers should not indefinitely consume memory and polling threads once their batch migration job has concluded. Graceful exit is a core architectural requirement.
+- **Alternative B: Completely Remove the Execute Button Once Completed**:
+  - *Rejected*: Users occasionally need to re-run migrations (e.g. after database schema adjustments or with Clean Wipe enabled). Re-labeling the action as `RE-RUN MIGRATION` with contextual warnings supports legitimate re-runs while preventing confusion.
+
+### 4. Trade-offs & Future Considerations
+- Users attempting to re-run a completed migration must ensure their Docker container is restarted (`docker start <container_name>`) before dispatching. Clear 503 error messages and UI badges now explain this requirement directly.
+
+---
+
+## [2026-09-16] - Complex NoSQL MongoDB Database Provisioning (`complex_nosql_enterprise`)
+
+### 1. Decision Summary
+Implemented [`scripts/seed_complex_nosql.py`](file:///d:/GitHub/Ai_data_migration_platform/scripts/seed_complex_nosql.py) to provision a production-scale NoSQL database (`complex_nosql_enterprise`) on MongoDB specifically designed to test the limits of SQL relational modeling and automated ETL migration engines:
+1. **Deep Hierarchical Trees (Levels 5–7)**: Modeled in `smart_iot_fleet`, featuring deep powertrain $\rightarrow$ MCU $\rightarrow$ chamber $\rightarrow$ sensor $\rightarrow$ calibration $\rightarrow$ matrix branches.
+2. **Extreme Schema Polymorphism**: Modeled in `omnichannel_customer_graph`, storing 3 radically distinct personas (`ENTERPRISE_ORGANIZATION`, `INDIVIDUAL_CONSUMER`, `ANONYMOUS_SESSION`) in a single collection.
+3. **Dynamic / Heterogeneous Typing**: Implemented in `polymorphic_event_bus`, where the same attribute (`payload.verification_code`) takes `int`, `str`, `dict`, `bool`, and `list` across documents.
+4. **Arrays of Arrays (2D Matrices)**: Modeled in `clinical_genomics_records`, incorporating nested arrays of quality score matrices and multi-tiered clinical sub-trees.
+5. **GeoJSON & 2dsphere Spatial Indexing**: Embedded Point geometries in `smart_iot_fleet` with native 2dsphere spatial index verification.
+6. **Unbounded Key-Value Dictionaries**: Embedded arbitrary dynamic sensor and phenotype maps with unique field names per device.
+7. **Rich BSON Types**: Integrated `Decimal128`, `Binary` (UUID/blobs), `Regex`, `ObjectId`, and `ISODate`.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**:
+  - Validating migration and ETL engines against basic flat NoSQL collections fails to expose real-world NoSQL-to-SQL impedance mismatches (e.g. 1NF violations, EAV anti-patterns, recursive joins, and polymorphic table splitting).
+  - This dataset provides a benchmark containing the 7 hardest NoSQL patterns to model in relational databases.
+- **Chosen Solution**:
+  - A clean 4-collection domain architecture populated with 620 high-fidelity, indexed documents.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Synthetic Random JSON Blob Generation**:
+  - *Rejected*: Random unstructured JSON lacks semantic business context, making schema inference testing unrealistic.
+- **Alternative B: Simple Flattened Arrays**:
+  - *Rejected*: Flat arrays are easily modeled with simple 1:N foreign keys in SQL; only multi-dimensional nested arrays (Level 5+) truly challenge relational normalization.
+
+### 4. Trade-offs & Future Considerations
+- Converting `complex_nosql_enterprise` into SQL will require advanced automated schema decomposition strategies (e.g., dynamic table generation, JSONB column relegation, or synthetic foreign-key surrogate synthesis).
+
+---
+
+## [2026-09-16] - Robust NoSQL-to-Relational ETL Hardening, PostgreSQL Dialect Sanitization & Polymorphic Coercion
+
+### 1. Decision Summary
+Fixed 5 systemic migration and execution engine failures during complex NoSQL-to-PostgreSQL ETL data migrations:
+1. **PostgreSQL DDL Dialect Sanitization & Auto-Healing**: Replaced non-standard `uuid_v4()` with native `gen_random_uuid()`, eliminated false-positive keyword suppression in `DDLExecutor`, and added runtime dialect error auto-healing with automatic SQL statement retry.
+2. **Polars LazyFrame Column Disambiguation**: Resolved duplicate `extra_attributes` schema collision in Polars by eliminating `hasattr(item, "name")` duck-typing (which falsely succeeded on `Expr.name` namespace objects) and replacing it with strict `isinstance(item, pl.Expr)` and `item.meta.output_name()`.
+3. **Polymorphic Boolean Coercion**: Implemented resilient `_parse_bool()` coercion across `direct_copy`, `type_cast`, and `nosql_field_promote` to safely convert polymorphic strings (e.g. `"PENDING_COOKIE_BANNER_ACCEPTANCE"` $\rightarrow$ `False`/`None`) and nested dictionaries into valid boolean values for `BOOLEAN NOT NULL` target columns.
+4. **Nested Dot-Path Field Extraction**: Enhanced `nosql_field_promote` to traverse dot-separated paths (e.g. `architecture.firmware_version`) when reading nested dictionaries stored within serialized JSON structures.
+5. **AI Execution Failure Diagnosis Expansion**: Added granular error classification rules for `TARGET_TABLE_MISSING`, `SQL_DIALECT_FUNCTION_ERROR`, and `HIGH_ROW_ERROR_RATE` in `ExecutionService.diagnose_failure()` to prevent default fallthrough to `UNKNOWN_ERROR`.
+
+### 2. Why This Approach? (Rationale)
+- **Zero-Loss Data Transfer**: Complex NoSQL databases frequently violate 1NF with polymorphic types (a field can be a boolean in one document, a status string in another, and a dictionary in a third). Without robust runtime coercion, strict SQL type constraints cause high row error rates and abort migrations.
+- **Dialect Portability**: LLM plan generators occasionally output cross-dialect SQL functions (`uuid_v4()` instead of `gen_random_uuid()`). Runtime regex replacement and automatic query retry ensure migrations succeed even if the plan contains minor dialect drift.
+- **Polars Performance & Stability**: Polars LazyFrames provide vectorized parallel processing, but strict schema checks fail if duplicate expressions share the same output name. Accurately disambiguating Polars expressions prevents slow row-by-row fallback loops.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Rejecting Incompatible Rows to Dead-Letter Queue**:
+  - *Rejected*: In enterprise migrations, dropping rows due to polymorphic status flags (e.g. `"PENDING_VERIFICATION"`) results in unacceptable data loss. Deterministic coercion preserves 100% row counts.
+- **Alternative B: Pure In-Memory Python Row Iteration**:
+  - *Rejected*: Python `for` loops across millions of rows are orders of magnitude slower than Polars columnar expressions and consume high memory.
+
+### 4. Trade-offs & Future Considerations
+- Coercing unrecognized string statuses to `False` satisfies `BOOLEAN NOT NULL` constraints while the original raw polymorphic values are preserved in the JSON catch-all column (`extra_attributes`).
+
+
+

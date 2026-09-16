@@ -797,6 +797,17 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
                   </p>
                 </div>
               )}
+
+              {activeJob && activeJob.status === 'completed' && !activeJob.is_dry_run && (
+                <div className="p-3 bg-emerald-950/40 border border-emerald-500/40 text-emerald-300 text-[11px] font-mono space-y-1 animate-fadeIn">
+                  <div className="flex items-center gap-2 font-bold uppercase text-xs text-emerald-400">
+                    <span>✓ Prior Run Completed</span>
+                  </div>
+                  <p className="font-sans text-zinc-300">
+                    This migration plan has already completed a live run. Re-executing will dispatch another job to your Docker Agent. Make sure your agent container is active on your host machine.
+                  </p>
+                </div>
+              )}
             </div>
 
             {/* Modal Actions */}

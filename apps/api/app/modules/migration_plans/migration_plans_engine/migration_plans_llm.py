@@ -53,6 +53,10 @@ RULES & INDUSTRY DATABASE ARCHITECTURE STANDARDS:
      Whenever a target table's primary key is mapped to 'uuid' (or converted to UUID from an integer source PK), ALL foreign key columns in other tables that reference this entity (e.g. 'category_id', 'customer_id', 'order_id', 'product_id') MUST ALSO use target_data_type 'uuid' with transformation_type 'type_cast'. A foreign key column MUST NEVER be left as 'bigint' or 'integer' if its referenced parent primary key is 'uuid'!
 7. TWO-PHASE DDL HYGIENE & DIALECT COMPLIANCE:
    - pre_migration_ddl: include CREATE TABLE DDL for target tables (and CREATE EXTENSION only if target is PostgreSQL). MUST NOT contain ANY inline or table-level FOREIGN KEY constraints.
+   - For PostgreSQL targets:
+     * ALWAYS use 'gen_random_uuid()' for UUID primary key defaults, e.g. 'id UUID PRIMARY KEY DEFAULT gen_random_uuid()'.
+     * NEVER generate 'uuid_v4()' or 'uuidv4()' as these functions do not exist in PostgreSQL.
+     * Include 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";' if needed.
    - For MySQL targets: DO NOT use 'gen_random_uuid()' or 'UUID' data types in DDL. Use 'VARCHAR(36) PRIMARY KEY' or 'BIGINT AUTO_INCREMENT PRIMARY KEY'.
    - post_migration_ddl: include CREATE INDEX and ALTER TABLE ... ADD CONSTRAINT FOREIGN KEY DDL statements.
    - Index naming convention: idx_{tablename}_{columnname}
