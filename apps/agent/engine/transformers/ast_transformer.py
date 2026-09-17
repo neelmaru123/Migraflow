@@ -118,9 +118,18 @@ class ASTTransformer:
         primary_key_strategy: Optional[str] = None,
         retry_seed_prefix: str = "default_seed",
         row_offset: int = 0,
+        source_origin: Optional[str] = None,
     ) -> Tuple[pl.DataFrame, int]:
         if df.is_empty():
             return df, 0
+
+        # Sanitize any Polars Object dtypes (e.g. UUID objects from psycopg2, custom Python objects)
+        # to Utf8 strings so that .cast(pl.Utf8), expressions, and downstream mappings operate seamlessly.
+        if any(dt == pl.Object for dt in df.schema.values()):
+            for c, dt in df.schema.items():
+                if dt == pl.Object:
+                    vals = [str(x) if x is not None else None for x in df[c].to_list()]
+                    df = df.with_columns(pl.Series(c, vals, dtype=pl.Utf8))
 
         exprs = []
         keep_columns = []
@@ -139,41 +148,38 @@ class ASTTransformer:
             source_cols_list: List[Dict],
             target_name: str,
         ) -> Optional[str]:
-            # 1. Exact match from AST source_columns (current source identifier's row)
-            if source_cols_list:
-                for sc in source_cols_list:
-                    c = sc.get("column_name")
-                    if c and c in df.columns:
-                        return c
+            # Priority 1: First configured source column actually present in df
+            for sc in source_cols_list:
+                cname = sc.get("column_name")
+                if cname and cname in df.columns:
+                    return cname
 
-            # 2. Target name exists directly in df
+            # Priority 2: Direct target column name match in df
             if target_name in df.columns:
                 return target_name
 
-            # 3. Any AST source_columns without table prefix
-            if source_cols_list:
-                for sc in source_cols_list:
-                    c = sc.get("column_name", "")
-                    bare = c.split(".")[-1] if "." in c else c
-                    if bare and bare in df.columns:
-                        return bare
+            # Priority 3: Strip table prefix from configured column names
+            for sc in source_cols_list:
+                cname = sc.get("column_name", "")
+                stripped = cname.split(".")[-1]
+                if stripped in df.columns:
+                    return stripped
 
-            # 4. Synonym-group fuzzy match
-            group = _synonym_group_for(target_name)
-            if group:
+            # Priority 4: Synonym fuzzy match
+            synonyms = _synonym_group_for(target_name)
+            if synonyms:
                 for candidate in df.columns:
-                    cand_norm = _normalize_col(candidate)
-                    if any(_normalize_col(g) == cand_norm for g in group):
+                    if _normalize_col(candidate) in synonyms:
                         logger.info(
                             f"[ASTTransformer] Fuzzy resolved target='{target_name}' "
-                            f"→ source='{candidate}' via semantic synonym group."
+                            f"to df column '{candidate}' via semantic synonym group."
                         )
                         return candidate
 
-            # 5. Normalized substring match (last resort)
-            target_norm = _normalize_col(target_name)
+            # Priority 5: Normalized target match
+            norm_target = _normalize_col(target_name)
             for candidate in df.columns:
-                if _normalize_col(candidate) == target_norm:
+                if _normalize_col(candidate) == norm_target:
                     logger.info(
                         f"[ASTTransformer] Normalized match target='{target_name}' → source='{candidate}'."
                     )
@@ -185,7 +191,10 @@ class ASTTransformer:
         # Helper: safe fallback expression when column cannot be resolved
         # ---------------------------------------------------------------
         def _unresolved_expr(target_col: str, col_spec: Dict) -> pl.Expr:
-            """Return a UUID series for PK/id columns, NULL literal for everything else."""
+            """Return lineage for _source_origin, UUID series for PK/id columns, NULL literal for everything else."""
+            if target_col == "_source_origin":
+                val = source_origin or col_spec.get("constant_value") or "unknown"
+                return pl.lit(str(val)).alias(target_col)
             if col_spec.get("is_primary_key") or target_col in ("id",):
                 uuid_list = [_deterministic_fallback_uuid(retry_seed_prefix, row_offset + i) for i in range(len(df))]
                 return pl.Series(target_col, uuid_list)
@@ -195,7 +204,7 @@ class ASTTransformer:
         # Process each column mapping
         # ---------------------------------------------------------------
         for col_spec in column_mappings:
-            target_col = col_spec.get("target_column_name")
+            target_col = col_spec.get("target_column_name") or col_spec.get("target_column")
             trans_type = col_spec.get("transformation_type", "direct_copy")
             source_cols = col_spec.get("source_columns", [])
             expr_tmpl = col_spec.get("expression_template")
@@ -205,13 +214,56 @@ class ASTTransformer:
                 continue
 
             keep_columns.append(target_col)
+
+            # Special handling for platform data lineage column _source_origin
+            if target_col == "_source_origin":
+                val = source_origin or const_val or "unknown"
+                exprs.append(pl.lit(str(val)).alias(target_col))
+                continue
+
             src_name = _resolve_src_col(source_cols, target_col)
 
             # ----------------------------------------------------------
             # 1. direct_copy
             # ----------------------------------------------------------
             if trans_type == "direct_copy":
-                if src_name:
+                target_dtype = str(col_spec.get("target_data_type", "")).lower()
+                if "uuid" in target_dtype and src_name:
+                    src_ident = source_cols[0].get("identifier", "source") if source_cols else "source"
+                    _sid = src_ident
+                    uuid_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
+                        lambda v, s=_sid: (
+                            str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{s}_{v}"))
+                            if v not in (None, "") and not (len(str(v)) == 36 and "-" in str(v))
+                            else (str(v) if (v not in (None, "") and len(str(v)) == 36 and "-" in str(v)) else None)
+                        ),
+                        return_dtype=pl.Utf8,
+                    )
+                    exprs.append(uuid_expr.alias(target_col))
+                elif any(kw in target_dtype for kw in ("bool", "boolean")) and src_name:
+                    is_nullable = bool(col_spec.get("nullable", True))
+                    def _parse_bool(v, nullable=is_nullable):
+                        if v is None:
+                            return None if nullable else False
+                        if isinstance(v, bool):
+                            return v
+                        if isinstance(v, (int, float)):
+                            return bool(v)
+                        s = str(v).strip().lower()
+                        if s in ("true", "t", "1", "yes", "y", "enabled", "clear", "cleared", "approved", "pass"):
+                            return True
+                        if s in ("false", "f", "0", "no", "n", "disabled", "rejected", "failed"):
+                            return False
+                        return None if nullable else False
+
+                    # NOTE: Polars map_elements skip_nulls=True by default, so _parse_bool is
+                    # never invoked for None values — they always return None from Polars.
+                    # For non-nullable columns, chain .fill_null(False) to coerce SQL/MongoDB NULLs.
+                    bool_expr = pl.col(src_name).map_elements(_parse_bool, return_dtype=pl.Boolean)
+                    if not is_nullable:
+                        bool_expr = bool_expr.fill_null(False)
+                    exprs.append(bool_expr.alias(target_col))
+                elif src_name:
                     exprs.append(pl.col(src_name).alias(target_col))
                 else:
                     exprs.append(_unresolved_expr(target_col, col_spec))
@@ -247,7 +299,7 @@ class ASTTransformer:
                             pk_expr = pl.Series(pk_list)
                         elif pk_strategy == "prefix_id":
                             _sid = src_ident  # capture for closure
-                            _col_vals = df[src_name].cast(pl.Utf8).to_list()
+                            _col_vals = [str(v) if v is not None else None for v in df[src_name].to_list()]
                             pk_list = [
                                 f"{_sid}_{v}" if v not in (None, "") else _deterministic_fallback_uuid(retry_seed_prefix, row_offset + i)
                                 for i, v in enumerate(_col_vals)
@@ -256,7 +308,7 @@ class ASTTransformer:
                         else:
                             # Default: deterministic UUID v5
                             _sid = src_ident
-                            _col_vals = df[src_name].cast(pl.Utf8).to_list()
+                            _col_vals = [str(v) if v is not None else None for v in df[src_name].to_list()]
                             pk_list = [
                                 str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{_sid}_{v}")) if v not in (None, "")
                                 else _deterministic_fallback_uuid(retry_seed_prefix, row_offset + i)
@@ -265,17 +317,39 @@ class ASTTransformer:
                             pk_expr = pl.Series(pk_list)
                         exprs.append(pk_expr.alias(target_col))
 
-                    elif "uuid" in target_dtype:
+                    elif "uuid" in target_dtype or col_spec.get("is_foreign_key_to_uuid"):
                         _sid = src_ident
                         uuid_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
                             lambda v, s=_sid: (
                                 str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{s}_{v}"))
                                 if v not in (None, "") and not (len(str(v)) == 36 and "-" in str(v))
-                                else str(v or "")
+                                else (str(v) if (v not in (None, "") and len(str(v)) == 36 and "-" in str(v)) else None)
                             ),
                             return_dtype=pl.Utf8,
                         )
                         exprs.append(uuid_expr.alias(target_col))
+
+                    elif any(kw in target_dtype for kw in ("bool", "boolean")):
+                        is_nullable = bool(col_spec.get("nullable", True))
+                        def _parse_bool(v, nullable=is_nullable):
+                            if v is None:
+                                return None if nullable else False
+                            if isinstance(v, bool):
+                                return v
+                            if isinstance(v, (int, float)):
+                                return bool(v)
+                            s = str(v).strip().lower()
+                            if s in ("true", "t", "1", "yes", "y", "enabled", "clear", "cleared", "approved", "pass"):
+                                return True
+                            if s in ("false", "f", "0", "no", "n", "disabled", "rejected", "failed"):
+                                return False
+                            return None if nullable else False
+
+                        # Polars map_elements skips Nones; chain fill_null for NOT NULL columns.
+                        bool_expr = pl.col(src_name).map_elements(_parse_bool, return_dtype=pl.Boolean)
+                        if not is_nullable:
+                            bool_expr = bool_expr.fill_null(False)
+                        exprs.append(bool_expr.alias(target_col))
 
                     elif "int" in target_dtype:
                         exprs.append(pl.col(src_name).cast(pl.Int64, strict=False).alias(target_col))
@@ -313,7 +387,6 @@ class ASTTransformer:
                             _parse_dt, return_dtype=pl.Utf8
                         )
                         exprs.append(dt_expr.alias(target_col))
-
 
                     else:
                         exprs.append(pl.col(src_name).cast(pl.Utf8).alias(target_col))
@@ -510,7 +583,64 @@ class ASTTransformer:
             # ----------------------------------------------------------
             elif trans_type == "nosql_field_promote":
                 if src_name:
-                    exprs.append(pl.col(src_name).cast(pl.Utf8).alias(target_col))
+                    target_dtype = str(col_spec.get("target_data_type", "")).lower()
+                    if any(kw in target_dtype for kw in ("bool", "boolean")):
+                        is_nullable = bool(col_spec.get("nullable", True))
+                        def _parse_bool(v, nullable=is_nullable):
+                            if v is None:
+                                return None if nullable else False
+                            if isinstance(v, bool):
+                                return v
+                            if isinstance(v, (int, float)):
+                                return bool(v)
+                            s = str(v).strip().lower()
+                            if s in ("true", "t", "1", "yes", "y", "enabled", "clear", "cleared", "approved", "pass"):
+                                return True
+                            if s in ("false", "f", "0", "no", "n", "disabled", "rejected", "failed"):
+                                return False
+                            return None if nullable else False
+
+                        # Polars map_elements skips Nones; chain fill_null for NOT NULL columns.
+                        bool_expr = pl.col(src_name).map_elements(_parse_bool, return_dtype=pl.Boolean)
+                        if not is_nullable:
+                            bool_expr = bool_expr.fill_null(False)
+                        exprs.append(bool_expr.alias(target_col))
+                    else:
+                        exprs.append(pl.col(src_name).cast(pl.Utf8).alias(target_col))
+                elif source_cols and "." in (source_cols[0].get("column_name") or ""):
+                    full_path = source_cols[0]["column_name"]
+                    parts = full_path.split(".")
+                    root_col = parts[0]
+                    sub_paths = parts[1:]
+                    if root_col in df.columns:
+                        is_nullable = bool(col_spec.get("nullable", True))
+                        default_fallback = col_spec.get("constant_value") or "UNKNOWN"
+                        def _extract_nested_promote(val, paths=sub_paths, nullable=is_nullable, fallback=default_fallback):
+                            curr = val
+                            if hasattr(curr, "to_dict"):
+                                curr = curr.to_dict()
+                            for p in paths:
+                                if isinstance(curr, dict):
+                                    curr = curr.get(p, "")
+                                elif isinstance(curr, str) and curr.startswith("{"):
+                                    try:
+                                        curr = json.loads(curr).get(p, "")
+                                    except Exception:
+                                        curr = ""
+                                else:
+                                    curr = ""
+                            res = str(curr) if curr not in (None, "") else ""
+                            if not res and not nullable:
+                                return fallback
+                            return res if res else (None if nullable else fallback)
+
+                        exprs.append(
+                            pl.col(root_col).map_elements(_extract_nested_promote, return_dtype=pl.Utf8).alias(target_col)
+                        )
+                    else:
+                        exprs.append(_unresolved_expr(target_col, col_spec))
+                else:
+                    exprs.append(_unresolved_expr(target_col, col_spec))
 
             # ----------------------------------------------------------
             # 13. lookup_join / any unknown — best-effort direct copy
@@ -523,18 +653,38 @@ class ASTTransformer:
         # Residual / unmapped field capture → extra_attributes JSONB
         # ---------------------------------------------------------------
         mapped_src_cols: set = set()
+        explicit_extra_attr_cols: list = []
         for col_spec in column_mappings:
-            if col_spec.get("target_column_name") and col_spec.get("transformation_type") != "drop_column":
+            target_col = col_spec.get("target_column_name") or col_spec.get("target_column")
+            if target_col and col_spec.get("transformation_type") != "drop_column":
                 for sc in col_spec.get("source_columns", []):
-                    c_name = sc.get("column_name", "")
+                    c_name = sc.get("column_name") or sc.get("column") or ""
                     mapped_src_cols.add(c_name)
                     if "." in c_name:
                         mapped_src_cols.add(c_name.split(".")[0])
+                    if target_col == "extra_attributes" and c_name in df.columns:
+                        explicit_extra_attr_cols.append(c_name)
 
         unmapped_cols = [c for c in df.columns if c not in mapped_src_cols and c not in ("_seq_id",)]
-        if unmapped_cols:
+        all_residual_cols = list(dict.fromkeys(explicit_extra_attr_cols + unmapped_cols))
+        all_residual_cols = [c for c in all_residual_cols if c in df.columns and c not in ("_seq_id",)]
+
+        if all_residual_cols:
             if "extra_attributes" not in keep_columns:
                 keep_columns.append("extra_attributes")
+
+            # CRITICAL: Remove any prior expression for 'extra_attributes' to prevent Polars DuplicateError
+            def _get_expr_name(item):
+                if isinstance(item, pl.Series):
+                    return item.name
+                if isinstance(item, pl.Expr):
+                    try:
+                        return item.meta.output_name()
+                    except Exception:
+                        return None
+                return None
+
+            exprs = [e for e in exprs if _get_expr_name(e) != "extra_attributes"]
 
             def _serialize_residual(struct_val):
                 res_dict = {}
@@ -545,18 +695,25 @@ class ASTTransformer:
                                 v = v.to_dict()
                             elif hasattr(v, "to_list"):
                                 v = v.to_list()
-                            res_dict[k] = v
+                            elif isinstance(v, str) and (v.startswith("{") or v.startswith("[")):
+                                try:
+                                    v = json.loads(v)
+                                except Exception:
+                                    pass
+                            if k in ("extra_attributes", "_extra_attributes", "residual_fields", "unmapped_attributes") and isinstance(v, dict):
+                                res_dict.update(v)
+                            else:
+                                res_dict[k] = v
                 return json.dumps(res_dict, default=str) if res_dict else "{}"
 
             try:
-                if "extra_attributes" in df.columns:
-                    df = df.drop("extra_attributes")
                 extra_attr_expr = pl.struct(
-                    [pl.col(c) for c in unmapped_cols if c in df.columns]
+                    [pl.col(c) for c in all_residual_cols]
                 ).map_elements(_serialize_residual, return_dtype=pl.Utf8)
                 exprs.append(extra_attr_expr.alias("extra_attributes"))
             except Exception as exc:
                 logger.warning(f"Residual field capture warning: {exc}")
+
 
         # ---------------------------------------------------------------
         # Apply all expressions to df
@@ -570,8 +727,16 @@ class ASTTransformer:
                     uuid_list = [_deterministic_fallback_uuid(retry_seed_prefix, row_offset + i) for i in range(len(transformed_df))]
                     transformed_df = transformed_df.with_columns(pl.Series("id", uuid_list))
 
+                def _clean_objects(dframe: pl.DataFrame) -> pl.DataFrame:
+                    for col_n, dt in dframe.schema.items():
+                        if dt == pl.Object:
+                            vals = [str(x) if x is not None else None for x in dframe[col_n].to_list()]
+                            dframe = dframe.with_columns(pl.Series(col_n, vals, dtype=pl.Utf8))
+                    return dframe
+
                 available_targets = [c for c in keep_columns if c in transformed_df.columns]
-                return transformed_df.select(available_targets), row_errors
+                res_df = transformed_df.select(available_targets) if available_targets else transformed_df
+                return _clean_objects(res_df), row_errors
 
             except Exception as exc:
                 logger.warning(
@@ -584,7 +749,12 @@ class ASTTransformer:
                     df = df.with_columns(pl.Series("id", uuid_list))
 
                 available_targets = [c for c in keep_columns if c in df.columns]
-                return df.select(available_targets) if available_targets else df, row_errors
+                fallback_df = df.select(available_targets) if available_targets else df
+                for col_n, dt in fallback_df.schema.items():
+                    if dt == pl.Object:
+                        vals = [str(x) if x is not None else None for x in fallback_df[col_n].to_list()]
+                        fallback_df = fallback_df.with_columns(pl.Series(col_n, vals, dtype=pl.Utf8))
+                return fallback_df, row_errors
 
         # Passthrough: ensure 'id' exists even with no expressions
         if "id" in keep_columns and "id" not in df.columns:
@@ -592,4 +762,9 @@ class ASTTransformer:
             df = df.with_columns(pl.Series("id", uuid_list))
 
         available_targets = [c for c in keep_columns if c in df.columns]
-        return df.select(available_targets) if available_targets else df, row_errors
+        pass_df = df.select(available_targets) if available_targets else df
+        for col_n, dt in pass_df.schema.items():
+            if dt == pl.Object:
+                vals = [str(x) if x is not None else None for x in pass_df[col_n].to_list()]
+                pass_df = pass_df.with_columns(pl.Series(col_n, vals, dtype=pl.Utf8))
+        return pass_df, row_errors

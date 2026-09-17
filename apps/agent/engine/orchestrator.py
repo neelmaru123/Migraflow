@@ -20,6 +20,19 @@ from .writers.target_writer import TargetWriterFactory
 logger = logging.getLogger("docker-agent-execution")
 
 
+class JobCancelledException(Exception):
+    """Raised when the backend signals that the user cancelled the execution job."""
+    pass
+
+
+def _report_progress(backend_url: str, agent_token: str, job_id: str, *args, **kwargs) -> Any:
+    """Helper that reports progress and raises JobCancelledException if job was cancelled."""
+    res = ProgressReporter.report(backend_url, agent_token, job_id, *args, **kwargs)
+    if res and isinstance(res, dict) and res.get("status") == "cancelled":
+        raise JobCancelledException(f"Execution job '{job_id}' was cancelled by user.")
+    return res
+
+
 class ExecutionOrchestrator:
     """Main orchestrator executing local ETL migration pipeline for an AST plan."""
 
@@ -33,12 +46,13 @@ class ExecutionOrchestrator:
         target_db_url: str,
         target_engine_type: str = "postgresql",
         is_dry_run: bool = False,
+        truncate_target: bool = False,
     ):
         plan_data = plan_ast.get("plan_data", {})
         if not is_dry_run:
             is_dry_run = bool(plan_ast.get("is_dry_run", False) or plan_data.get("is_dry_run", False))
 
-        logger.info(f"=== STARTING LOCAL ETL EXECUTION FOR JOB '{job_id}' (Dry Run: {is_dry_run}) ===")
+        logger.info(f"=== STARTING LOCAL ETL EXECUTION FOR JOB '{job_id}' (Dry Run: {is_dry_run}, Clean Wipe: {truncate_target}) ===")
         pre_ddl = plan_data.get("pre_migration_ddl", [])
         post_ddl = plan_data.get("post_migration_ddl", [])
         table_mappings = plan_data.get("table_mappings", [])
@@ -82,8 +96,32 @@ class ExecutionOrchestrator:
                 total_estimated_rows += int(st.get("row_count", 0) or 0)
 
         try:
+            # Step 0: Ensure Target Database Exists & Live Pre-Flight Check / Clean Wipe
+            if not is_dry_run and target_db_url:
+                DDLExecutor._ensure_database_exists(target_db_url)
+                existing_tables = DDLExecutor.get_existing_tables_and_counts(target_db_url, target_engine_type)
+                if existing_tables:
+                    existing_summary = ", ".join(f"{t['table_name']} ({t['row_count']} rows)" for t in existing_tables)
+                    if truncate_target:
+                        logger.warning(
+                            f"=== CLEAN WIPE TARGET DATABASE REQUESTED ===\n"
+                            f"Dropping all {len(existing_tables)} existing table(s) in target database: {existing_summary}"
+                        )
+                        _report_progress(
+                            backend_url, agent_token, job_id, "running", 5.0, 0, 0, 0, 0,
+                            total_rows=total_estimated_rows, current_stage="target_clean_wipe"
+                        )
+                        dropped = DDLExecutor.clean_wipe_target_database(target_db_url, target_engine_type)
+                        logger.info(f"Clean wipe complete. Dropped target tables: {dropped}")
+                    else:
+                        logger.warning(
+                            f"=== TARGET DATABASE CONTAINS EXISTING DATA ===\n"
+                            f"Existing tables detected: {existing_summary}\n"
+                            f"User did not select Clean Wipe. Proceeding with APPEND mode (ON CONFLICT DO NOTHING)."
+                        )
+
             # Step 1: Pre-Migration DDL
-            ProgressReporter.report(
+            _report_progress(
                 backend_url, agent_token, job_id, "running", 10.0, 0, 0, 0, 0,
                 total_rows=total_estimated_rows, current_stage="pre_ddl"
             )
@@ -101,7 +139,7 @@ class ExecutionOrchestrator:
 
                 logger.info(f"Processing table [{idx}/{total_tables}]: '{target_table}'...")
                 pct = 10.0 + (float(idx) / float(total_tables) * 80.0)
-                ProgressReporter.report(
+                _report_progress(
                     backend_url, agent_token, job_id, "running", pct,
                     total_processed, total_successful, total_failed, total_skipped,
                     total_rows=total_estimated_rows if total_estimated_rows > 0 else (total_processed if total_processed > 0 else 0),
@@ -229,8 +267,13 @@ class ExecutionOrchestrator:
 
                             logger.info(f"Extracted chunk of {len(df_raw)} rows from source '{src_ident}.{src_table}' (Offset: {offset}).")
                             retry_seed_prefix = f"{job_id}:{target_table}:{src_ident}:{src_table}"
+                            src_origin_tag = f"{src_ident}.{src_table}" if src_ident else str(src_table)
                             df_trans, trans_errors = ASTTransformer.transform_chunk(
-                                df_raw, column_mappings, retry_seed_prefix=retry_seed_prefix, row_offset=offset
+                                df_raw,
+                                column_mappings,
+                                retry_seed_prefix=retry_seed_prefix,
+                                row_offset=offset,
+                                source_origin=src_origin_tag,
                             )
                             total_failed += trans_errors
 
@@ -279,7 +322,7 @@ class ExecutionOrchestrator:
                             pass
 
             # Step 3: Post-Migration DDL (Foreign Keys)
-            ProgressReporter.report(
+            _report_progress(
                 backend_url, agent_token, job_id, "running", 95.0,
                 total_processed, total_successful, total_failed, total_skipped,
                 total_rows=total_estimated_rows, current_stage="post_ddl"
@@ -312,13 +355,16 @@ class ExecutionOrchestrator:
                 logger.info(f"[DRY RUN] Preserving checkpoints (no-op) for dry run job '{job_id}'.")
                 final_status = "dry_run_completed"
 
-            ProgressReporter.report(
+            _report_progress(
                 backend_url, agent_token, job_id, final_status, 100.0,
                 total_processed, total_successful, total_failed, total_skipped,
                 total_rows=total_estimated_rows, current_stage=final_status
             )
             logger.info(f"=== MIGRATION JOB '{job_id}' ({final_status.upper()})! (Processed: {total_processed}, Would Write: {total_successful}, Failed: {total_failed}, Skipped: {total_skipped}) ===")
 
+        except JobCancelledException:
+            logger.warning(f"=== MIGRATION JOB '{job_id}' WAS CANCELLED BY USER. Halting pipeline. ===")
+            return
         except Exception as exc:
             err_msg = f"Migration job '{job_id}' failed: {exc}"
             logger.error(err_msg, exc_info=True)

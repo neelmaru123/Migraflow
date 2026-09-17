@@ -45,6 +45,14 @@ class AgentMetadataEngine:
         if "mongo" in scheme or url_val.strip().startswith("mongodb"):
             return cls._introspect_mongodb(identifier, url_val)
 
+        # For target/destination databases, ensure database exists before connecting
+        if any(tag in identifier.lower() for tag in ["dest", "dst", "target"]):
+            try:
+                from engine.ddl_executor import DDLExecutor
+                DDLExecutor._ensure_database_exists(sync_url)
+            except Exception as ensure_exc:
+                logger.warning(f"Notice during target database auto-creation check for '{identifier}': {ensure_exc}")
+
         try:
             engine = create_engine(sync_url, echo=False, pool_pre_ping=True, connect_args={"connect_timeout": 5})
             with engine.connect() as conn:

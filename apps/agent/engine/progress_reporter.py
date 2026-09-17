@@ -1,9 +1,7 @@
-"""
-HTTP backend progress reporter module for agent execution engine.
-"""
-
 import json
 import logging
+import time
+import urllib.error
 import urllib.request
 from typing import Optional
 
@@ -29,6 +27,9 @@ class ProgressReporter:
         current_stage: Optional[str] = None,
         error_message: Optional[str] = None,
     ):
+        if not backend_url or "testserver" in backend_url:
+            return
+
         url = f"{backend_url.rstrip('/')}/api/v1/executions/{job_id}/progress"
         payload = json.dumps({
             "status": status,
@@ -52,14 +53,32 @@ class ProgressReporter:
             },
             method="POST",
         )
-        if not backend_url or "testserver" in backend_url:
-            return
 
-        try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                if resp.status not in (200, 201):
-                    logger.warning(f"Progress report update returned HTTP status {resp.status} for job '{job_id}'.")
-        except urllib.error.HTTPError as http_err:
-            logger.error(f"Progress report failed for job '{job_id}' with HTTP status {http_err.code}: {http_err.reason}")
-        except Exception as exc:
-            logger.warning(f"Could not transmit progress report for job '{job_id}': {exc}")
+        is_terminal = status in ("completed", "dry_run_completed", "failed")
+        max_attempts = 4 if is_terminal else 2
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    if resp.status in (200, 201):
+                        try:
+                            data = json.loads(resp.read().decode("utf-8", errors="ignore"))
+                            return data
+                        except Exception:
+                            return {"status": status}
+                    logger.warning(
+                        f"Progress report attempt {attempt}/{max_attempts} returned HTTP status {resp.status} for job '{job_id}'."
+                    )
+            except urllib.error.HTTPError as http_err:
+                logger.error(
+                    f"Progress report attempt {attempt}/{max_attempts} failed for job '{job_id}' with HTTP {http_err.code}: {http_err.reason}"
+                )
+                if http_err.code in (401, 403, 404):
+                    break  # Unrecoverable auth/not found error
+            except Exception as exc:
+                logger.warning(
+                    f"Progress report attempt {attempt}/{max_attempts} failed for job '{job_id}': {exc}"
+                )
+
+            if attempt < max_attempts:
+                time.sleep(0.5 * (2 ** attempt))

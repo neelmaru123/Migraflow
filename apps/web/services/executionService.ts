@@ -7,11 +7,22 @@ export const executionService = {
    */
   async startPlanExecution(
     planId: string,
-    options?: { chunk_size?: number; is_dry_run?: boolean }
+    options?: { chunk_size?: number; is_dry_run?: boolean; truncate_target?: boolean }
   ): Promise<ExecutionJobResponse> {
     const response = await apiClient.post<ExecutionJobResponse>(
       `/plans/${planId}/execute`,
       options || {}
+    );
+    return response.data;
+  },
+
+  /**
+   * Cancel an active migration or dry-run execution job
+   */
+  async cancelExecution(jobId: string, reason?: string): Promise<ExecutionJobResponse> {
+    const response = await apiClient.post<ExecutionJobResponse>(
+      `/executions/${jobId}/cancel`,
+      { reason }
     );
     return response.data;
   },

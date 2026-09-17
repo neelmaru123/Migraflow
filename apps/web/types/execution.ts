@@ -13,12 +13,23 @@ export interface AIDiagnosisPayload {
   raw_error_snippet?: string;
 }
 
+export interface ExecutionStartOptions {
+  chunk_size?: number;
+  is_dry_run?: boolean;
+  truncate_target?: boolean;
+}
+
+export interface ExecutionCancelRequest {
+  reason?: string;
+}
+
 export interface ExecutionJobResponse {
   id: string;
   migration_plan_id: string;
   agent_id?: string | null;
   status: ExecutionStatus;
   is_dry_run?: boolean;
+  truncate_target?: boolean;
   progress: number;
   total_rows: number;
   processed_rows: number;

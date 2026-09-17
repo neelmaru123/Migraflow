@@ -1,6 +1,10 @@
 import { apiClient } from './axios';
 import {
   PlanDetailResponse,
+  PlanGenerationJobResponse,
+  PlanGenerationStatusResponse,
+  PlanRefinementJobResponse,
+  PlanRefinementStatusResponse,
   PlanResponse,
   PlanValidationResultResponse,
   TargetDatabaseConfig,
@@ -8,7 +12,7 @@ import {
 
 export const planService = {
   /**
-   * Create and generate an AI migration plan for an agent
+   * Create and generate an AI migration plan for an agent (synchronous legacy)
    */
   async createPlan(agentId: string, targetConfig: TargetDatabaseConfig): Promise<PlanDetailResponse> {
     const response = await apiClient.post<PlanDetailResponse>(
@@ -19,6 +23,28 @@ export const planService = {
       },
       { timeout: 180000 } // 3 minutes timeout for complex LLM generation graph (EC-09)
     );
+    return response.data;
+  },
+
+  /**
+   * Create and generate an AI migration plan asynchronously in the background (returns immediately)
+   */
+  async startGeneration(agentId: string, targetConfig: TargetDatabaseConfig): Promise<PlanGenerationJobResponse> {
+    const response = await apiClient.post<PlanGenerationJobResponse>(
+      '/plans/generate-async',
+      {
+        agent_id: agentId,
+        target_config: targetConfig,
+      }
+    );
+    return response.data;
+  },
+
+  /**
+   * Poll status of an ongoing or completed plan generation for an agent
+   */
+  async getGenerationStatus(agentId: string): Promise<PlanGenerationStatusResponse> {
+    const response = await apiClient.get<PlanGenerationStatusResponse>(`/plans/agent/${agentId}/generation-status`);
     return response.data;
   },
 
@@ -47,7 +73,7 @@ export const planService = {
   },
 
   /**
-   * Refine an existing migration plan using natural language prompt feedback
+   * Refine an existing migration plan using natural language prompt feedback (synchronous)
    */
   async refinePlan(planId: string, userFeedback: string): Promise<PlanDetailResponse> {
     const response = await apiClient.post<PlanDetailResponse>(
@@ -55,8 +81,29 @@ export const planService = {
       {
         user_feedback: userFeedback,
       },
-      { timeout: 180000 } // 3 minutes timeout for LLM plan refinement (EC-09)
+      { timeout: 360000 } // 6 minutes timeout for backward-compatibility
     );
+    return response.data;
+  },
+
+  /**
+   * Refine an existing migration plan asynchronously in the background (returns immediately)
+   */
+  async startRefinement(planId: string, userFeedback: string): Promise<PlanRefinementJobResponse> {
+    const response = await apiClient.post<PlanRefinementJobResponse>(
+      `/plans/${planId}/refine-async`,
+      {
+        user_feedback: userFeedback,
+      }
+    );
+    return response.data;
+  },
+
+  /**
+   * Poll status of an ongoing or completed plan refinement
+   */
+  async getRefinementStatus(planId: string): Promise<PlanRefinementStatusResponse> {
+    const response = await apiClient.get<PlanRefinementStatusResponse>(`/plans/${planId}/refine/status`);
     return response.data;
   },
 

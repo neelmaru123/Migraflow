@@ -6,6 +6,7 @@ Handles plan creation, retrieval, and lifecycle management.
 import asyncio
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException, status
@@ -13,6 +14,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
+from app.core.db import AsyncSessionLocal
 from app.core.websocket_manager import manager
 from app.modules.agents.agents_models import Agent
 from app.modules.metadata.metadata_models import MetadataSnapshot, MetadataSchema, MetadataTable
@@ -28,6 +31,10 @@ from app.modules.migration_plans.migration_plans_models import (
 )
 from app.modules.migration_plans.migration_plans_schemas import (
     PlanDetailResponse,
+    PlanGenerationJobResponse,
+    PlanGenerationStatusResponse,
+    PlanRefinementJobResponse,
+    PlanRefinementStatusResponse,
     PlanResponse,
     TargetDatabaseConfig,
     TransformationPlanAST,
@@ -35,6 +42,223 @@ from app.modules.migration_plans.migration_plans_schemas import (
 from app.modules.sources.sources_models import DataSource
 
 logger = logging.getLogger(__name__)
+
+
+class RefinementTaskManager:
+    """Thread-safe in-memory task tracker for long-running AI plan refinements."""
+    _tasks: Dict[uuid.UUID, Dict[str, Any]] = {}
+    _lock: asyncio.Lock = asyncio.Lock()
+
+    @classmethod
+    async def start_task(cls, plan_id: uuid.UUID, user_prompt: str) -> str:
+        async with cls._lock:
+            task_id = str(uuid.uuid4())
+            cls._tasks[plan_id] = {
+                "task_id": task_id,
+                "plan_id": plan_id,
+                "status": "processing",
+                "user_prompt": user_prompt,
+                "started_at": datetime.now(timezone.utc),
+                "completed_at": None,
+                "error": None,
+                "plan": None,
+            }
+            return task_id
+
+    @classmethod
+    async def get_task(cls, plan_id: uuid.UUID) -> Optional[Dict[str, Any]]:
+        async with cls._lock:
+            task = cls._tasks.get(plan_id)
+            if not task:
+                return None
+            started = task.get("started_at")
+            completed = task.get("completed_at")
+            now = completed or datetime.now(timezone.utc)
+            elapsed = (now - started).total_seconds() if started else 0.0
+            task_copy = dict(task)
+            task_copy["elapsed_seconds"] = round(elapsed, 1)
+            return task_copy
+
+    @classmethod
+    async def complete_task(cls, plan_id: uuid.UUID, plan_detail: Any) -> None:
+        async with cls._lock:
+            if plan_id in cls._tasks:
+                cls._tasks[plan_id]["status"] = "completed"
+                cls._tasks[plan_id]["completed_at"] = datetime.now(timezone.utc)
+                cls._tasks[plan_id]["plan"] = plan_detail
+                cls._tasks[plan_id]["error"] = None
+
+    @classmethod
+    async def fail_task(cls, plan_id: uuid.UUID, error_message: str) -> None:
+        async with cls._lock:
+            if plan_id in cls._tasks:
+                cls._tasks[plan_id]["status"] = "failed"
+                cls._tasks[plan_id]["completed_at"] = datetime.now(timezone.utc)
+                cls._tasks[plan_id]["error"] = error_message
+
+    @classmethod
+    async def is_running(cls, plan_id: uuid.UUID) -> bool:
+        async with cls._lock:
+            task = cls._tasks.get(plan_id)
+            return bool(task and task.get("status") == "processing")
+
+
+class GenerationTaskManager:
+    """Thread-safe in-memory task tracker for long-running AI initial plan generation."""
+    _tasks: Dict[uuid.UUID, Dict[str, Any]] = {}
+    _lock: asyncio.Lock = asyncio.Lock()
+
+    @classmethod
+    async def start_task(
+        cls, agent_id: uuid.UUID, plan_id: uuid.UUID, target_database_type: Optional[str] = None
+    ) -> str:
+        async with cls._lock:
+            task_id = str(uuid.uuid4())
+            cls._tasks[agent_id] = {
+                "task_id": task_id,
+                "agent_id": agent_id,
+                "plan_id": plan_id,
+                "status": "processing",
+                "target_database_type": target_database_type,
+                "started_at": datetime.now(timezone.utc),
+                "completed_at": None,
+                "error": None,
+                "plan": None,
+            }
+            return task_id
+
+    @classmethod
+    async def get_task(cls, agent_id: uuid.UUID) -> Optional[Dict[str, Any]]:
+        async with cls._lock:
+            task = cls._tasks.get(agent_id)
+            if not task:
+                return None
+            started = task.get("started_at")
+            completed = task.get("completed_at")
+            now = completed or datetime.now(timezone.utc)
+            elapsed = (now - started).total_seconds() if started else 0.0
+            task_copy = dict(task)
+            task_copy["elapsed_seconds"] = round(elapsed, 1)
+            return task_copy
+
+    @classmethod
+    async def complete_task(cls, agent_id: uuid.UUID, plan_id: uuid.UUID, plan_detail: Any) -> None:
+        async with cls._lock:
+            if agent_id in cls._tasks:
+                cls._tasks[agent_id]["status"] = "completed"
+                cls._tasks[agent_id]["plan_id"] = plan_id
+                cls._tasks[agent_id]["completed_at"] = datetime.now(timezone.utc)
+                cls._tasks[agent_id]["plan"] = plan_detail
+                cls._tasks[agent_id]["error"] = None
+
+    @classmethod
+    async def fail_task(cls, agent_id: uuid.UUID, error_message: str) -> None:
+        async with cls._lock:
+            if agent_id in cls._tasks:
+                cls._tasks[agent_id]["status"] = "failed"
+                cls._tasks[agent_id]["completed_at"] = datetime.now(timezone.utc)
+                cls._tasks[agent_id]["error"] = error_message
+
+    @classmethod
+    async def is_running(cls, agent_id: uuid.UUID) -> bool:
+        async with cls._lock:
+            task = cls._tasks.get(agent_id)
+            return bool(task and task.get("status") == "processing")
+
+
+def to_plan_detail_dto(plan: MigrationPlan) -> PlanDetailResponse:
+    """Converts a MigrationPlan ORM instance into PlanDetailResponse DTO."""
+    warnings = []
+    if plan.validation_errors and isinstance(plan.validation_errors, dict):
+        warnings = plan.validation_errors.get("warnings", [])
+
+    return PlanDetailResponse(
+        id=plan.id,
+        agent_id=plan.agent_id,
+        status=plan.status,
+        ai_model=plan.ai_model,
+        confidence_score=plan.confidence_score,
+        is_valid=plan.is_valid,
+        validation_errors=plan.validation_errors,
+        validation_warnings=warnings,
+        created_at=plan.created_at,
+        updated_at=plan.updated_at,
+        plan_data=plan.plan_data,
+        target_config=plan.target_config,
+        prompt_version=plan.prompt_version,
+    )
+
+
+async def _run_plan_refinement_background(
+    plan_id: uuid.UUID, user_feedback: str
+):
+    """Background coroutine running AI refinement with a fresh AsyncSession."""
+    async with AsyncSessionLocal() as session:
+        try:
+            plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
+            if not plan:
+                await RefinementTaskManager.fail_task(plan_id, f"Plan '{plan_id}' not found.")
+                return
+
+            refined_plan = await MigrationPlanService.execute_refinement_core(
+                session, plan, user_feedback
+            )
+            plan_dto = to_plan_detail_dto(refined_plan)
+            await RefinementTaskManager.complete_task(plan_id, plan_dto)
+            logger.info(f"Background AI refinement successfully completed for plan '{plan_id}'.")
+        except Exception as exc:
+            logger.error(f"Background AI refinement failed for plan '{plan_id}': {exc}", exc_info=True)
+            await RefinementTaskManager.fail_task(plan_id, str(exc))
+            try:
+                async with AsyncSessionLocal() as recovery_session:
+                    stmt = select(MigrationPlan).where(MigrationPlan.id == plan_id)
+                    r_res = await recovery_session.execute(stmt)
+                    r_plan = r_res.scalar_one_or_none()
+                    if r_plan and r_plan.status == "refining":
+                        r_plan.status = "edited" if r_plan.plan_data else "draft"
+                        await recovery_session.commit()
+            except Exception as rec_err:
+                logger.warning(f"Failed to revert plan status on refinement error: {rec_err}")
+
+
+async def _run_plan_generation_background(
+    plan_id: uuid.UUID, agent_id: uuid.UUID, target_config_dict: dict
+):
+    """Background coroutine running initial AI plan generation with a fresh AsyncSession."""
+    async with AsyncSessionLocal() as session:
+        try:
+            stmt_agent = (
+                select(Agent)
+                .where(Agent.id == agent_id)
+                .options(selectinload(Agent.data_sources))
+            )
+            res_agent = await session.execute(stmt_agent)
+            agent = res_agent.scalar_one_or_none()
+            if not agent:
+                await GenerationTaskManager.fail_task(agent_id, f"Agent '{agent_id}' not found.")
+                return
+
+            target_config = TargetDatabaseConfig(**target_config_dict)
+            generated_plan = await MigrationPlanService.execute_generation_core(
+                session, plan_id, agent, target_config
+            )
+            plan_dto = to_plan_detail_dto(generated_plan)
+            await GenerationTaskManager.complete_task(agent_id, plan_id, plan_dto)
+            logger.info(f"Background AI plan generation completed for agent '{agent_id}' (plan: '{plan_id}').")
+        except Exception as exc:
+            logger.error(f"Background AI plan generation failed for agent '{agent_id}': {exc}", exc_info=True)
+            await GenerationTaskManager.fail_task(agent_id, str(exc))
+            try:
+                async with AsyncSessionLocal() as recovery_session:
+                    stmt = select(MigrationPlan).where(MigrationPlan.id == plan_id)
+                    r_res = await recovery_session.execute(stmt)
+                    r_plan = r_res.scalar_one_or_none()
+                    if r_plan and r_plan.status == "generating":
+                        r_plan.status = "draft_failed"
+                        r_plan.validation_errors = {"explanation": str(exc), "errors": [str(exc)]}
+                        await recovery_session.commit()
+            except Exception as rec_err:
+                logger.warning(f"Failed to update draft_failed status on generation error: {rec_err}")
 
 
 class MigrationPlanService:
@@ -60,6 +284,8 @@ class MigrationPlanService:
 
         source_count = 0
         for ds in data_sources:
+            if ds.role == "target":
+                continue
             # Build logical alias: src_db_1, src_db_2, etc.
             source_count += 1
             alias = ds.identifier if ds.identifier else f"source_db_{source_count}"
@@ -104,18 +330,13 @@ class MigrationPlanService:
         return snapshots, alias_map
 
     @staticmethod
-    async def create_plan_for_agent(
+    async def execute_generation_core(
         session: AsyncSession,
+        plan_id: uuid.UUID,
         agent: Agent,
         target_config: TargetDatabaseConfig,
     ) -> MigrationPlan:
-        """
-        Full plan generation lifecycle using LangGraph StateGraph:
-        1. Fetch latest MetadataSnapshots for all Agent DataSources.
-        2. Execute LangGraph workflow (Nodes 1 -> 2 -> 3 -> Router -> Node 5 interrupt).
-        3. Run feasibility validator.
-        4. Persist MigrationPlan entity with validation status.
-        """
+        """Executes the AI plan generation pipeline and populates the given plan_id."""
         from app.modules.migration_plans.migration_plans_engine.migration_plans_graph import (
             migration_plan_graph,
         )
@@ -127,7 +348,19 @@ class MigrationPlanService:
             session, agent
         )
 
-        target_db_type = target_config.database_type
+        target_ds = next(
+            (ds for ds in (agent.data_sources or []) if ds.role in ("target", "both") and ds.type),
+            None,
+        )
+        if target_ds:
+            target_db_type = target_ds.type.lower()
+            target_config.database_type = target_db_type
+            if not target_config.identifier:
+                target_config.identifier = target_ds.identifier
+        else:
+            target_db_type = (target_config.database_type or "postgresql").lower()
+            target_config.database_type = target_db_type
+
         custom_instructions = target_config.custom_instructions
 
         initial_state = {
@@ -148,7 +381,6 @@ class MigrationPlanService:
             "persisted_plan_id": None,
         }
 
-        # Run LangGraph graph
         plan_status = "draft"
         plan_ast_dict = None
         val_res_dict = None
@@ -163,7 +395,6 @@ class MigrationPlanService:
                 plan_status = "draft"
         except Exception as exc:
             logger.error(f"LangGraph execution exception: {exc}")
-            # Direct LLM fallback if graph interrupted
             context_str = MetadataContextSerializer.serialize(
                 snapshots=snapshots,
                 source_aliases=alias_map,
@@ -186,20 +417,34 @@ class MigrationPlanService:
 
         is_valid = val_res_dict.get("is_valid", False) if val_res_dict else False
 
-        migration_plan = MigrationPlan(
-            user_id=agent.user_id,
-            agent_id=agent.id,
-            status=plan_status,
-            plan_data=plan_ast_dict or {"error": "Generation failed"},
-            target_config=target_config.model_dump(mode="json"),
-            ai_model=f"{settings_llm_provider()}:{settings_llm_model()}",
-            prompt_version=PROMPT_VERSION,
-            confidence_score=plan_ast_dict.get("confidence_score", 0.9) if plan_ast_dict else 0.0,
-            is_valid=is_valid,
-            validation_errors=val_res_dict,
-        )
-        session.add(migration_plan)
-        await session.flush()
+        stmt = select(MigrationPlan).where(MigrationPlan.id == plan_id)
+        res = await session.execute(stmt)
+        migration_plan = res.scalar_one_or_none()
+        if not migration_plan:
+            migration_plan = MigrationPlan(
+                id=plan_id,
+                user_id=agent.user_id,
+                agent_id=agent.id,
+                status=plan_status,
+                plan_data=plan_ast_dict or {"error": "Generation failed"},
+                target_config=target_config.model_dump(mode="json"),
+                ai_model=f"{settings_llm_provider()}:{settings_llm_model()}",
+                prompt_version=PROMPT_VERSION,
+                confidence_score=plan_ast_dict.get("confidence_score", 0.9) if plan_ast_dict else 0.0,
+                is_valid=is_valid,
+                validation_errors=val_res_dict,
+            )
+            session.add(migration_plan)
+            await session.flush()
+        else:
+            migration_plan.status = plan_status
+            migration_plan.plan_data = plan_ast_dict or {"error": "Generation failed"}
+            migration_plan.target_config = target_config.model_dump(mode="json")
+            migration_plan.ai_model = f"{settings_llm_provider()}:{settings_llm_model()}"
+            migration_plan.prompt_version = PROMPT_VERSION
+            migration_plan.confidence_score = plan_ast_dict.get("confidence_score", 0.9) if plan_ast_dict else 0.0
+            migration_plan.is_valid = is_valid
+            migration_plan.validation_errors = val_res_dict
 
         for snap in snapshots:
             join_row = MigrationPlanSnapshot(
@@ -208,7 +453,6 @@ class MigrationPlanService:
             )
             session.add(join_row)
 
-        # Create Version 1 snapshot
         initial_version = MigrationPlanVersion(
             migration_plan_id=migration_plan.id,
             version_number=1,
@@ -223,6 +467,169 @@ class MigrationPlanService:
 
         await session.commit()
         return migration_plan
+
+    @staticmethod
+    async def create_plan_for_agent(
+        session: AsyncSession,
+        agent: Agent,
+        target_config: TargetDatabaseConfig,
+    ) -> MigrationPlan:
+        """Synchronously creates and generates a plan for an agent (for backward compatibility)."""
+        plan_id = uuid.uuid4()
+        initial_plan = MigrationPlan(
+            id=plan_id,
+            user_id=agent.user_id,
+            agent_id=agent.id,
+            status="generating",
+            plan_data={},
+            target_config=target_config.model_dump(mode="json"),
+            ai_model=f"{settings_llm_provider()}:{settings_llm_model()}",
+            prompt_version=PROMPT_VERSION,
+            confidence_score=0.0,
+            is_valid=False,
+            validation_errors=None,
+        )
+        session.add(initial_plan)
+        await session.flush()
+        return await MigrationPlanService.execute_generation_core(
+            session, plan_id, agent, target_config
+        )
+
+    @staticmethod
+    async def start_async_generation(
+        session: AsyncSession,
+        agent: Agent,
+        target_config: TargetDatabaseConfig,
+    ) -> tuple[str, uuid.UUID]:
+        """Initiates an asynchronous background plan generation task, returning (task_id, plan_id) immediately."""
+        # 1. Concurrency Check
+        if await GenerationTaskManager.is_running(agent.id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An AI migration plan generation is already in progress for this agent.",
+            )
+
+        # Check DB if a plan for this agent is already in 'generating' state
+        stmt_gen = select(MigrationPlan).where(
+            MigrationPlan.agent_id == agent.id, MigrationPlan.status == "generating"
+        )
+        res_gen = await session.execute(stmt_gen)
+        if res_gen.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An AI migration plan generation is already in progress for this agent.",
+            )
+
+        # Validate agent has snapshots before creating record
+        snapshots, _ = await MigrationPlanService._fetch_latest_snapshots_for_agent(session, agent)
+        if not snapshots:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="No metadata snapshots found for any of this agent's data sources. Run the Docker Agent first to collect metadata before generating a plan.",
+            )
+
+        target_ds = next(
+            (ds for ds in (agent.data_sources or []) if ds.role in ("target", "both") and ds.type),
+            None,
+        )
+        if target_ds:
+            target_db_type = target_ds.type.lower()
+            target_config.database_type = target_db_type
+            if not target_config.identifier:
+                target_config.identifier = target_ds.identifier
+        else:
+            target_db_type = (target_config.database_type or "postgresql").lower()
+            target_config.database_type = target_db_type
+
+        # Create placeholder MigrationPlan record in DB
+        initial_plan = MigrationPlan(
+            user_id=agent.user_id,
+            agent_id=agent.id,
+            status="generating",
+            plan_data={},
+            target_config=target_config.model_dump(mode="json"),
+            ai_model=f"{settings_llm_provider()}:{settings_llm_model()}",
+            prompt_version=PROMPT_VERSION,
+            confidence_score=0.0,
+            is_valid=False,
+            validation_errors=None,
+        )
+        session.add(initial_plan)
+        await session.commit()
+
+        task_id = await GenerationTaskManager.start_task(agent.id, initial_plan.id, target_db_type)
+
+        # Launch detached background coroutine
+        asyncio.create_task(
+            _run_plan_generation_background(
+                initial_plan.id, agent.id, target_config.model_dump(mode="json")
+            )
+        )
+        return task_id, initial_plan.id
+
+    @staticmethod
+    async def get_generation_status(
+        session: AsyncSession,
+        agent_id: uuid.UUID,
+    ) -> PlanGenerationStatusResponse:
+        """Fetches the current status of an ongoing or completed plan generation for the given agent."""
+        task = await GenerationTaskManager.get_task(agent_id)
+        if task:
+            return PlanGenerationStatusResponse(
+                task_id=task.get("task_id"),
+                agent_id=agent_id,
+                plan_id=task.get("plan_id"),
+                status=task.get("status", "idle"),
+                target_database_type=task.get("target_database_type"),
+                started_at=task.get("started_at"),
+                completed_at=task.get("completed_at"),
+                elapsed_seconds=task.get("elapsed_seconds"),
+                error=task.get("error"),
+                plan=task.get("plan"),
+            )
+
+        # Fallback to database if server restarted or memory evicted
+        stmt = (
+            select(MigrationPlan)
+            .where(MigrationPlan.agent_id == agent_id)
+            .order_by(MigrationPlan.created_at.desc())
+        )
+        res = await session.execute(stmt)
+        latest_plan = res.scalars().first()
+        if not latest_plan:
+            return PlanGenerationStatusResponse(agent_id=agent_id, status="idle")
+
+        if latest_plan.status == "generating":
+            now = datetime.now(timezone.utc)
+            created_aware = (
+                latest_plan.created_at
+                if latest_plan.created_at.tzinfo
+                else latest_plan.created_at.replace(tzinfo=timezone.utc)
+            )
+            elapsed = (now - created_aware).total_seconds()
+            return PlanGenerationStatusResponse(
+                task_id=None,
+                agent_id=agent_id,
+                plan_id=latest_plan.id,
+                status="processing",
+                target_database_type=(
+                    latest_plan.target_config.get("database_type")
+                    if isinstance(latest_plan.target_config, dict)
+                    else None
+                ),
+                started_at=latest_plan.created_at,
+                elapsed_seconds=round(elapsed, 1),
+            )
+
+        # If latest plan was completed/drafted
+        return PlanGenerationStatusResponse(
+            task_id=None,
+            agent_id=agent_id,
+            plan_id=latest_plan.id,
+            status="idle",
+            target_database_type=None,
+            plan=to_plan_detail_dto(latest_plan),
+        )
 
     @staticmethod
     async def get_plan_by_id(
@@ -316,12 +723,12 @@ class MigrationPlanService:
         return plan
 
     @staticmethod
-    async def refine_plan(
+    async def execute_refinement_core(
         session: AsyncSession,
         plan: MigrationPlan,
         user_feedback: str,
     ) -> MigrationPlan:
-        """Refines a plan using natural language user feedback via LLM + Validator."""
+        """Core execution logic for plan refinement, shared by sync and async pathways."""
         from app.modules.migration_plans.migration_plans_engine.migration_plans_validator import (
             MigrationPlanValidator,
         )
@@ -363,6 +770,7 @@ class MigrationPlanService:
             custom_instructions=custom_instructions,
         )
 
+        llm_timeout = float(getattr(settings, "LLM_TIMEOUT_SECONDS", 360.0))
         try:
             refined_ast_obj = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -371,12 +779,12 @@ class MigrationPlanService:
                     current_ast_dict=plan.plan_data,
                     user_feedback=user_feedback,
                 ),
-                timeout=60.0,
+                timeout=llm_timeout,
             )
         except asyncio.TimeoutError:
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail="LLM plan refinement timed out after 60 seconds. Please try again.",
+                detail=f"LLM plan refinement timed out after {int(llm_timeout)} seconds. Please try again.",
             )
 
         refined_ast_dict = refined_ast_obj.model_dump(mode="json")
@@ -409,6 +817,72 @@ class MigrationPlanService:
 
         await session.commit()
         return plan
+
+    @staticmethod
+    async def refine_plan(
+        session: AsyncSession,
+        plan: MigrationPlan,
+        user_feedback: str,
+    ) -> MigrationPlan:
+        """Synchronously refines a plan using natural language user feedback via LLM + Validator."""
+        return await MigrationPlanService.execute_refinement_core(session, plan, user_feedback)
+
+    @staticmethod
+    async def start_async_refinement(
+        session: AsyncSession,
+        plan: MigrationPlan,
+        user_feedback: str,
+    ) -> str:
+        """Initiates an asynchronous background refinement task, returning the task_id immediately."""
+        await MigrationPlanService._check_active_execution_lock(session, plan.id)
+
+        if await RefinementTaskManager.is_running(plan.id) or plan.status == "refining":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A plan refinement is already in progress for this plan.",
+            )
+
+        task_id = await RefinementTaskManager.start_task(plan.id, user_feedback)
+        plan.status = "refining"
+        await session.commit()
+
+        # Launch detached background coroutine
+        asyncio.create_task(_run_plan_refinement_background(plan.id, user_feedback))
+        return task_id
+
+    @staticmethod
+    async def get_refinement_status(
+        session: AsyncSession,
+        plan: MigrationPlan,
+    ) -> PlanRefinementStatusResponse:
+        """Fetches the current status of a refinement task for the given plan."""
+        task = await RefinementTaskManager.get_task(plan.id)
+        if task:
+            return PlanRefinementStatusResponse(
+                task_id=task.get("task_id"),
+                plan_id=plan.id,
+                status=task.get("status", "idle"),
+                user_prompt=task.get("user_prompt"),
+                started_at=task.get("started_at"),
+                completed_at=task.get("completed_at"),
+                elapsed_seconds=task.get("elapsed_seconds"),
+                error=task.get("error"),
+                plan=task.get("plan"),
+            )
+
+        # Fallback if server restarted or task finished before memory retention
+        is_refining = plan.status == "refining"
+        return PlanRefinementStatusResponse(
+            task_id=None,
+            plan_id=plan.id,
+            status="processing" if is_refining else "idle",
+            user_prompt=None,
+            started_at=None,
+            completed_at=None,
+            elapsed_seconds=None,
+            error=None,
+            plan=to_plan_detail_dto(plan) if not is_refining else None,
+        )
 
     @staticmethod
     async def list_plan_versions(
@@ -530,6 +1004,12 @@ class MigrationPlanService:
         from app.modules.migration_plans.migration_plans_engine.migration_plans_validator import (
             MigrationPlanValidator,
         )
+
+        if plan.status == "refining":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Cannot approve a migration plan while AI refinement is actively running.",
+            )
 
         if plan.agent:
             snapshots, alias_map = await MigrationPlanService._fetch_latest_snapshots_for_agent(

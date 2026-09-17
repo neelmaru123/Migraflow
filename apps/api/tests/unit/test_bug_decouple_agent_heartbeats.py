@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[3].parent
+REPO_ROOT = Path(__file__).resolve().parents[3]
 AGENT_DIR = REPO_ROOT / "apps" / "agent"
 if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
@@ -28,6 +28,10 @@ def test_heartbeat_thread_continues_during_job_execution():
     agent_token = "ag_live_testtoken123"
     version = "1.0.0"
     interval = 1  # 1 second interval for fast test execution
+
+    hb_config = agent_main.HeartbeatConfig()
+    hb_config._interval = interval
+    hb_config.ACTIVE_INTERVAL = interval
 
     heartbeat_call_count = 0
     heartbeat_lock = threading.Lock()
@@ -48,6 +52,7 @@ def test_heartbeat_thread_continues_during_job_execution():
             version=version,
             interval=interval,
             stop_event=stop_event,
+            heartbeat_config=hb_config,
         )
 
         # Simulate long-running job execution for 2.5 seconds

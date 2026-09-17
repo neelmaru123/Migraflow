@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[3].parent
+REPO_ROOT = Path(__file__).resolve().parents[3]
 API_DIR = REPO_ROOT / "apps" / "api"
 AGENT_DIR = REPO_ROOT / "apps" / "agent"
 if str(API_DIR) not in sys.path:
@@ -51,7 +51,8 @@ def test_mongo_keyset_pagination_chunk_reading():
 
     class MockMongoClient:
         def __init__(self, *args, **kwargs):
-            pass
+            self.admin = MagicMock()
+            self.admin.command = MagicMock(return_value={"ok": 1})
 
         def __getitem__(self, item):
             return MockDB()

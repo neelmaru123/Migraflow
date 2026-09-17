@@ -14,17 +14,31 @@ Covers:
 """
 
 import os
+import sys
+from pathlib import Path
 import sqlite3
 import uuid
 import polars as pl
 import pytest
 from sqlalchemy import create_engine, text
 
-from apps.agent.engine.transformers.ast_transformer import (
-    ASTTransformer,
-    _deterministic_fallback_uuid,
-)
-from apps.agent.engine.writers.target_writer import TargetWriterFactory
+REPO_ROOT = Path(__file__).resolve().parents[3]
+AGENT_DIR = REPO_ROOT / "apps" / "agent"
+if str(AGENT_DIR) not in sys.path:
+    sys.path.insert(0, str(AGENT_DIR))
+
+try:
+    from engine.transformers.ast_transformer import (
+        ASTTransformer,
+        _deterministic_fallback_uuid,
+    )
+    from engine.writers.target_writer import TargetWriterFactory
+except ImportError:
+    from apps.agent.engine.transformers.ast_transformer import (
+        ASTTransformer,
+        _deterministic_fallback_uuid,
+    )
+    from apps.agent.engine.writers.target_writer import TargetWriterFactory
 
 
 def test_happy_path_regression_non_null_values():

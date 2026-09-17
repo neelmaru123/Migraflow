@@ -46,11 +46,17 @@ RULES & INDUSTRY DATABASE ARCHITECTURE STANDARDS:
 5. CANONICAL NAMING & CASING STANDARD:
    - ALL target table names and column names MUST be in clean, lowercase snake_case (e.g. user_accounts, created_at).
 6. PRIMARY KEYS & AUDIT COLUMNS STANDARD:
-   - Every target table MUST have a primary key column named 'id' (VARCHAR(36) for MySQL, UUID/BIGINT for PostgreSQL).
+   - Every target table MUST have a primary key column named 'id' (or '_id' when target is MongoDB). (VARCHAR(36) for MySQL, UUID/BIGINT for PostgreSQL, UUID/VARCHAR(36) for MongoDB).
    - Every target table MUST include enterprise audit timestamp columns 'created_at' and 'updated_at' (DATETIME for MySQL, TIMESTAMPTZ for PostgreSQL) using transformation_type 'new_column_added'.
    - Merged tables MUST include a '_source_origin' column (VARCHAR) to track data lineage per row.
+   - FOREIGN KEY & PRIMARY KEY TYPE SYNCHRONIZATION:
+     Whenever a target table's primary key is mapped to 'uuid' (or converted to UUID from an integer source PK), ALL foreign key columns in other tables that reference this entity (e.g. 'category_id', 'customer_id', 'order_id', 'product_id') MUST ALSO use target_data_type 'uuid' with transformation_type 'type_cast'. A foreign key column MUST NEVER be left as 'bigint' or 'integer' if its referenced parent primary key is 'uuid'!
 7. TWO-PHASE DDL HYGIENE & DIALECT COMPLIANCE:
    - pre_migration_ddl: include CREATE TABLE DDL for target tables (and CREATE EXTENSION only if target is PostgreSQL). MUST NOT contain ANY inline or table-level FOREIGN KEY constraints.
+   - For PostgreSQL targets:
+     * ALWAYS use 'gen_random_uuid()' for UUID primary key defaults, e.g. 'id UUID PRIMARY KEY DEFAULT gen_random_uuid()'.
+     * NEVER generate 'uuid_v4()' or 'uuidv4()' as these functions do not exist in PostgreSQL.
+     * Include 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";' if needed.
    - For MySQL targets: DO NOT use 'gen_random_uuid()' or 'UUID' data types in DDL. Use 'VARCHAR(36) PRIMARY KEY' or 'BIGINT AUTO_INCREMENT PRIMARY KEY'.
    - post_migration_ddl: include CREATE INDEX and ALTER TABLE ... ADD CONSTRAINT FOREIGN KEY DDL statements.
    - Index naming convention: idx_{tablename}_{columnname}
@@ -106,6 +112,13 @@ RULES & INDUSTRY DATABASE ARCHITECTURE STANDARDS:
     - phone / mobile / telephone / phone_number / contact_number → same concept
     - created_at / created_time / creation_date / registration_date → same concept
     - customer_id / account_id / user_id / client_id (when referencing same entity) → same concept
+
+18. TARGET DATABASE MONGODB RULES:
+    When target_database_type is "mongodb":
+    - Target entities are collections, not relational tables.
+    - Every collection's primary key column MUST be named '_id' (with target_data_type 'uuid' or 'varchar(36)').
+    - pre_migration_ddl MUST be an empty list []. Do NOT generate SQL CREATE TABLE DDL statements for MongoDB!
+    - post_migration_ddl should contain db.<collection>.createIndex(...) commands or be an empty list [].
 
 ALLOWED transformation_type TAXONOMY (column level):
   direct_copy         → Copy column value as-is from source to target
@@ -276,6 +289,8 @@ class LLMPlanGeneratorService:
         model = settings.LLM_MODEL
         temperature = settings.LLM_TEMPERATURE
 
+        llm_timeout = float(getattr(settings, "LLM_TIMEOUT_SECONDS", 180.0))
+
         if provider == "gemini":
             try:
                 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -283,6 +298,7 @@ class LLMPlanGeneratorService:
                     model=model,
                     temperature=temperature,
                     google_api_key=settings.GEMINI_API_KEY,
+                    request_timeout=llm_timeout,
                 )
             except ImportError as exc:
                 raise RuntimeError("langchain-google-genai is not installed. Run: poetry add langchain-google-genai") from exc
@@ -294,6 +310,7 @@ class LLMPlanGeneratorService:
                     model=model,
                     temperature=temperature,
                     api_key=settings.OPENAI_API_KEY,
+                    request_timeout=llm_timeout,
                 )
             except ImportError as exc:
                 raise RuntimeError("langchain-openai is not installed. Run: poetry add langchain-openai") from exc
@@ -385,12 +402,36 @@ class LLMPlanGeneratorService:
         llm = self._get_llm()
         parser = PydanticOutputParser(pydantic_object=TransformationPlanAST)
 
+        table_count_before = len(current_ast_dict.get("table_mappings", []))
+
         feedback_instructions = []
         if user_feedback:
             feedback_instructions.append(f"USER FEEDBACK INSTRUCTION:\n{user_feedback}")
         if validation_errors:
             err_list = "\n".join(f"- {err}" for err in validation_errors)
             feedback_instructions.append(f"STRUCTURAL VALIDATION ERRORS TO FIX:\n{err_list}")
+
+        feasibility_rules = (
+            f"\nCRITICAL FEASIBILITY & TRANSPARENCY RULES FOR REFINEMENT:\n"
+            f"1. The current plan has {table_count_before} target tables.\n"
+            f"2. Evaluate the USER FEEDBACK INSTRUCTION against the source database metadata and zero-data-loss constraints.\n"
+            f"3. If the user asks for a structural change that is IMPOSSIBLE, WOULD CAUSE DATA LOSS, or VIOLATES SCHEMA FEASIBILITY "
+            f"(such as reducing 15 source tables into 12 tables when tables have incompatible schemas and no shared keys):\n"
+            f"   - DO NOT claim that you consolidated tables if you did not actually change table_mappings!\n"
+            f"   - Set refinement_feedback.applied = false\n"
+            f"   - Set refinement_feedback.verdict = 'infeasible_rejected'\n"
+            f"   - Set refinement_feedback.explanation = a clear, detailed, and respectful technical response explaining to the user "
+            f"     exactly why their request is not possible without data loss, identifying the incompatible tables or constraints.\n"
+            f"   - Keep the safe, lossless tables in table_mappings.\n"
+            f"4. If the user's request IS feasible and safe to apply:\n"
+            f"   - Apply the requested adjustments to table_mappings and column_mappings.\n"
+            f"   - Set refinement_feedback.applied = true (or verdict = 'partially_applied' if only safe subsets were applied).\n"
+            f"   - Set refinement_feedback.explanation = a summary of the adjustments applied.\n"
+            f"5. Always set refinement_feedback.user_prompt = the user feedback text.\n"
+            f"6. Set refinement_feedback.table_count_before = {table_count_before} and table_count_after = count of updated target tables.\n"
+            f"7. Set refinement_feedback.changes_summary = bullet points describing what was changed or what constraints prevented changes.\n"
+        )
+        feedback_instructions.append(feasibility_rules)
 
         instructions_str = "\n\n".join(feedback_instructions)
 
@@ -404,7 +445,7 @@ class LLMPlanGeneratorService:
                             f"{parser.get_format_instructions()}\n\n"
                             f"Here is the database metadata context:\n{context_str}\n\n"
                             f"Here is the CURRENT TransformationPlan AST blueprint:\n```json\n{json.dumps(current_ast_dict, indent=2)}\n```\n\n"
-                            f"Apply the following refinement instructions to update and improve the TransformationPlan AST blueprint:\n"
+                            f"Apply the following refinement instructions to evaluate, update, and improve the TransformationPlan AST blueprint:\n"
                             f"{instructions_str}\n\n"
                             f"Output the updated complete TransformationPlan JSON matching the schema."
                         )
@@ -425,6 +466,36 @@ class LLMPlanGeneratorService:
                 response = llm.invoke(messages)
                 content = str(response.content)
                 result = parser.parse(content)
+
+                # Defensive fallback: guarantee refinement_feedback is populated even if model omitted it
+                table_count_after = len(result.table_mappings)
+                if result.refinement_feedback is None:
+                    from app.modules.migration_plans.migration_plans_schemas import RefinementFeedback
+                    applied = (table_count_before != table_count_after) or (user_feedback is None)
+                    verdict = "applied" if applied else "infeasible_rejected"
+                    explanation = result.ai_explanation
+                    if not applied and user_feedback:
+                        explanation = (
+                            f"The requested refinement ('{user_feedback}') could not be applied without data loss or schema incompatibilities. "
+                            f"The original {table_count_before} target tables were preserved to guarantee 100% data fidelity."
+                        )
+                    result.refinement_feedback = RefinementFeedback(
+                        applied=applied,
+                        verdict=verdict,
+                        user_prompt=user_feedback,
+                        explanation=explanation,
+                        table_count_before=table_count_before,
+                        table_count_after=table_count_after,
+                        changes_summary=result.warnings or [],
+                    )
+                else:
+                    if result.refinement_feedback.table_count_before is None:
+                        result.refinement_feedback.table_count_before = table_count_before
+                    if result.refinement_feedback.table_count_after is None:
+                        result.refinement_feedback.table_count_after = table_count_after
+                    if not result.refinement_feedback.user_prompt and user_feedback:
+                        result.refinement_feedback.user_prompt = user_feedback
+
                 logger.info(f"LLM plan refinement succeeded on attempt {attempt}.")
                 return result
             except Exception as exc:

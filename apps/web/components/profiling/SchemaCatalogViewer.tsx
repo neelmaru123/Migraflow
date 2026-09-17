@@ -22,9 +22,9 @@ export const SchemaCatalogViewer: React.FC<SchemaCatalogViewerProps> = ({
   selectedSourceId,
   onSourceSelect,
 }) => {
-  // Filter catalog tabs to display ONLY Source Databases during schema inspection & plan generation phase
+  // Display ONLY Source Databases (target databases are excluded from catalog inspection)
   const sourceDataSources = dataSources.filter((ds) => ds.role === 'source' || ds.role === 'both');
-  const displayDataSources = sourceDataSources.length > 0 ? sourceDataSources : dataSources;
+  const displayDataSources = sourceDataSources.length > 0 ? sourceDataSources : dataSources.filter((ds) => ds.role !== 'target');
 
   const defaultSource = displayDataSources[0];
 

@@ -570,9 +570,10 @@ def poll_and_execute_tasks(
                 job_id = task.get("job_id")
                 plan_id = task.get("migration_plan_id")
                 is_dry_run = bool(task.get("is_dry_run", False))
+                truncate_target = bool(task.get("truncate_target", False))
 
                 try:
-                    logger.info(f"Fetching AST plan '{plan_id}' for job '{job_id}' (Dry Run: {is_dry_run}) via X-Agent-Token...")
+                    logger.info(f"Fetching AST plan '{plan_id}' for job '{job_id}' (Dry Run: {is_dry_run}, Clean Wipe: {truncate_target}) via X-Agent-Token...")
 
                     # Fetch full plan AST from API using Agent token auth
                     plan_url = f"{backend_url.rstrip('/')}/api/v1/plans/{plan_id}"
@@ -601,17 +602,16 @@ def poll_and_execute_tasks(
                         target_db_url=dest_url,
                         target_engine_type=target_engine_type,
                         is_dry_run=is_dry_run,
+                        truncate_target=truncate_target,
                     )
+
+                    # Trigger metadata snapshot re-sync after migration completes so control plane has fresh row counts
+                    try:
+                        sync_metadata_snapshots(backend_url, clean_token)
+                    except Exception as sync_exc:
+                        logger.warning(f"Notice: Could not re-sync metadata snapshot after migration: {sync_exc}")
                 except Exception as run_err:
                     logger.error(f"Execution error for job '{job_id}': {run_err}")
-                    try:
-                        ProgressReporter.report(
-                            backend_url, clean_token, job_id,
-                            status="failed", progress=0.0,
-                            error_message=f"Agent Execution Failure: {str(run_err)}"
-                        )
-                    except Exception as rep_err:
-                        logger.error(f"Failed to report job failure to backend: {rep_err}")
     except Exception as exc:
         logger.warning(f"Task polling check exception: {exc}")
 
@@ -665,7 +665,7 @@ def start_heartbeat_thread(
     version: str,
     interval: int,
     stop_event: threading.Event,
-    heartbeat_config: "HeartbeatConfig",
+    heartbeat_config: Optional["HeartbeatConfig"] = None,
 ) -> threading.Thread:
     """
     Launches a dedicated daemon background thread that sends periodic heartbeats
@@ -675,6 +675,11 @@ def start_heartbeat_thread(
       - RESUME_ACTIVE_MODE: restores 20-sec interval when a new job is detected
       - SHUTDOWN          : sets stop_event to trigger graceful container exit (Option A)
     """
+    if heartbeat_config is None:
+        heartbeat_config = HeartbeatConfig()
+        heartbeat_config._interval = interval
+        heartbeat_config.ACTIVE_INTERVAL = interval
+
     def _run() -> None:
         logger.info(f"Background heartbeat loop started (initial interval: {heartbeat_config.current}s).")
         while not stop_event.is_set():

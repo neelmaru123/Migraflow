@@ -136,11 +136,26 @@ async def test_migration_plan_versioning_and_restoration_flow():
         # 3. Refine Plan (Version 2 Created)
         refined_ast = _make_test_ast()
         refined_ast.ai_explanation = "Refined AST version 2"
+        from app.modules.migration_plans.migration_plans_schemas import RefinementFeedback
+        refined_ast.refinement_feedback = RefinementFeedback(
+            applied=False,
+            verdict="infeasible_rejected",
+            user_prompt="Can we do that same conversion without data loss in 12 tables",
+            explanation="Consolidating into 12 tables is not feasible without data loss. The 14 distinct source tables represent separate business domains.",
+            table_count_before=14,
+            table_count_after=14,
+            changes_summary=["All 14 domain tables retained to preserve 100% data fidelity."]
+        )
         with patch.object(llm_plan_generator, "refine", return_value=refined_ast):
             res_refine = await client.post(f"/api/v1/plans/{plan_id}/refine", json={
-                "user_feedback": "Rename table target_users to target_customers"
+                "user_feedback": "Can we do that same conversion without data loss in 12 tables"
             })
         assert res_refine.status_code == 200
+        ref_payload = res_refine.json()["plan_data"]["refinement_feedback"]
+        assert ref_payload is not None
+        assert ref_payload["applied"] is False
+        assert ref_payload["verdict"] == "infeasible_rejected"
+        assert "12 tables is not feasible" in ref_payload["explanation"]
 
         # 4. Update Plan Data (Version 3 Created)
         edited_ast = refined_ast.model_dump(mode="json")
@@ -158,7 +173,7 @@ async def test_migration_plan_versioning_and_restoration_flow():
         assert vers_list[0]["edit_type"] == "manual_ast_edit"
         assert vers_list[1]["version_number"] == 2
         assert vers_list[1]["edit_type"] == "llm_refinement"
-        assert vers_list[1]["user_feedback"] == "Rename table target_users to target_customers"
+        assert vers_list[1]["user_feedback"] == "Can we do that same conversion without data loss in 12 tables"
         assert vers_list[2]["version_number"] == 1
         assert vers_list[2]["edit_type"] == "initial_ai_generation"
 

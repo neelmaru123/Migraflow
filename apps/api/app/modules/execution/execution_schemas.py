@@ -12,6 +12,12 @@ class ExecutionStartRequest(BaseModel):
     """Request payload to initiate execution for an approved MigrationPlan."""
     chunk_size: Optional[int] = Field(default=50000, ge=1000, le=500000, description="Rows per ETL chunk batch")
     is_dry_run: bool = Field(default=False, description="Simulate migration without executing DDL or writing to target DB")
+    truncate_target: bool = Field(default=False, description="Clean wipe/drop all existing tables in target database before executing DDL and migration")
+
+
+class ExecutionCancelRequest(BaseModel):
+    """Optional request payload when cancelling/resetting an active execution job."""
+    reason: Optional[str] = Field(default=None, description="Optional cancellation reason or explanation")
 
 
 class ExecutionProgressUpdate(BaseModel):
@@ -37,6 +43,7 @@ class ExecutionJobResponse(BaseModel):
     agent_id: Optional[UUID] = None
     status: str
     is_dry_run: bool = False
+    truncate_target: bool = False
     progress: float
     total_rows: int
     processed_rows: int
@@ -59,4 +66,5 @@ class AgentTaskItemResponse(BaseModel):
     migration_plan_id: UUID
     status: str
     is_dry_run: bool = False
+    truncate_target: bool = False
     created_at: datetime

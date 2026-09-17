@@ -94,8 +94,8 @@ def test_mongo_bulk_write_error_partial_success():
         )
 
     assert successful == 8
-    assert failed == 2
-    assert skipped == 0
+    assert failed == 0
+    assert skipped == 2
 
 
 def test_execution_progress_update_schema_with_skipped_rows():

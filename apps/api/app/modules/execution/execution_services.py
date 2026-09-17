@@ -103,6 +103,7 @@ class ExecutionService:
         user_id: uuid.UUID,
         plan_id: uuid.UUID,
         is_dry_run: bool = False,
+        truncate_target: bool = False,
     ) -> MigrationJob:
         # Check plan existence and ownership
         stmt_plan = select(MigrationPlan).where(
@@ -169,7 +170,7 @@ class ExecutionService:
             is_offline = False
             if not agent or not agent.last_seen_at:
                 is_offline = True
-            elif agent.status == "error":
+            elif agent.status in ("error", "offline"):
                 is_offline = True
             elif agent.last_seen_at.tzinfo is not None and agent.last_seen_at < cutoff_utc:
                 is_offline = True
@@ -178,12 +179,10 @@ class ExecutionService:
 
             if is_offline:
                 agent_name = agent.name if agent else "Assigned Agent"
+                status_detail = f" (status: '{agent.status}')" if agent and agent.status else ""
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=(
-                        f"Cannot start migration: Assigned Docker Agent '{agent_name}' is OFFLINE! "
-                        f"Please start your local Docker Agent container first."
-                    ),
+                    detail=f"Cannot execute plan: {agent_name} is currently offline or unreachable{status_detail}. Ensure the agent Docker container is actively running on the host.",
                 )
 
         # Reset idle_since: agent is now active with a new job
@@ -193,10 +192,6 @@ class ExecutionService:
             agent_for_reset = res_reset_idle.scalar_one_or_none()
             if agent_for_reset:
                 agent_for_reset.idle_since = None
-                if agent_for_reset.status == "offline":
-                    agent_for_reset.status = "online"
-                    agent_for_reset.last_error = None
-                    agent_for_reset.error_category = None
 
         # Check if target tables already contain rows (preflight check via snapshot)
         existing_data_warnings = await ExecutionService.check_target_tables_existing_data(
@@ -212,6 +207,7 @@ class ExecutionService:
             agent_id=plan.agent_id,
             status="queued",
             is_dry_run=is_dry_run,
+            truncate_target=truncate_target,
             total_rows=0,
             processed_rows=0,
             successful_rows=0,
@@ -356,6 +352,78 @@ class ExecutionService:
         return job
 
     @staticmethod
+    async def cancel_execution_job(
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        job_id: uuid.UUID,
+        reason: Optional[str] = None,
+    ) -> MigrationJob:
+        """
+        Cancels an active ('queued', 'preparing', 'running') execution job.
+        Frees the migration plan for subsequent runs and resets the assigned Docker Agent status.
+        """
+        stmt = (
+            select(MigrationJob)
+            .join(MigrationPlan, MigrationJob.migration_plan_id == MigrationPlan.id)
+            .where(MigrationJob.id == job_id, MigrationPlan.user_id == user_id)
+        )
+        res = await session.execute(stmt)
+        job = res.scalar_one_or_none()
+        if not job:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Execution job '{job_id}' not found or access denied.",
+            )
+
+        if job.status not in ["queued", "preparing", "running"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot cancel execution job with status '{job.status}'. Only active jobs (queued, preparing, running) can be cancelled.",
+            )
+
+        now = datetime.now(timezone.utc)
+        job.status = "cancelled"
+        job.completed_at = now
+        job.current_stage = "cancelled"
+        job.error_message = reason or "Execution cancelled by user."
+
+        # Reset assigned Docker Agent status to online
+        if job.agent_id:
+            stmt_agent = select(Agent).where(Agent.id == job.agent_id)
+            res_agent = await session.execute(stmt_agent)
+            agent_obj = res_agent.scalar_one_or_none()
+            if agent_obj:
+                if agent_obj.status in ["busy", "offline", "error"]:
+                    agent_obj.status = "online"
+                agent_obj.idle_since = now
+
+            # Broadcast cancellation event via WebSocket
+            await manager.broadcast_to_agent(
+                str(job.agent_id),
+                {
+                    "event_type": "EXECUTION_PROGRESS",
+                    "data": {
+                        "job_id": str(job.id),
+                        "status": "cancelled",
+                        "progress": job.progress,
+                        "processed_rows": job.processed_rows,
+                        "successful_rows": job.successful_rows,
+                        "failed_rows": job.failed_rows,
+                        "current_stage": "cancelled",
+                        "error_message": job.error_message,
+                    },
+                    "job_id": str(job.id),
+                    "status": "cancelled",
+                    "error_message": job.error_message,
+                },
+            )
+
+        await session.commit()
+        await session.refresh(job)
+        logger.info(f"Execution job '{job.id}' was cancelled by user '{user_id}'. Reason: {job.error_message}")
+        return job
+
+    @staticmethod
     async def list_jobs_for_user(
         session: AsyncSession, user_id: uuid.UUID
     ) -> List[MigrationJob]:
@@ -395,6 +463,10 @@ class ExecutionService:
                 detail=f"Execution job '{job_id}' not found or access denied for this agent.",
             )
 
+        # If job was already cancelled by the user, return cancelled status immediately without overwriting
+        if job.status == "cancelled":
+            return job
+
         now = datetime.now(timezone.utc)
         if update.status == "running" and job.started_at is None:
             job.started_at = now
@@ -405,9 +477,12 @@ class ExecutionService:
         job.progress = update.progress
         if update.total_rows > 0:
             job.total_rows = update.total_rows
-        job.processed_rows = update.processed_rows
-        job.successful_rows = update.successful_rows
-        job.failed_rows = update.failed_rows
+        if update.processed_rows > 0 or job.processed_rows is None:
+            job.processed_rows = update.processed_rows
+        if update.successful_rows > 0 or job.successful_rows is None:
+            job.successful_rows = update.successful_rows
+        if update.failed_rows > 0 or job.failed_rows is None:
+            job.failed_rows = update.failed_rows
         if update.current_table:
             job.current_table = update.current_table
         if update.current_stage:
@@ -434,9 +509,6 @@ class ExecutionService:
                     agent_obj.error_category = "JOB_EXECUTION_FAILURE"
                     agent_obj.last_error_at = now
                     agent_obj.idle_since = now
-
-        await session.commit()
-        await session.refresh(job)
 
         await session.commit()
         await session.refresh(job)
@@ -581,6 +653,40 @@ class ExecutionService:
             fix_steps = [
                 "Verify database usernames and passwords in container environment variables.",
                 "Ensure password placeholders like <SRC_SRC_DB_1_PASSWORD> are replaced with valid credentials."
+            ]
+        elif "undefinedtable" in err_lower or ("relation" in err_lower and "does not exist" in err_lower):
+            category = "TARGET_TABLE_MISSING"
+            user_env_issue = False
+            diag_summary = f"Target table '{tbl}' does not exist in target database because pre-migration DDL table creation failed or was skipped."
+            fix_steps = [
+                "Verify target DDL statements use valid SQL syntax for the target database engine (e.g. gen_random_uuid() on PostgreSQL).",
+                "Ensure pre-migration DDL statements execute without errors before starting data streaming.",
+                "Re-run migration with the updated agent image (data-migration-agent:latest) which auto-heals DDL function compatibility."
+            ]
+        elif "undefinedfunction" in err_lower or "function uuid_v4() does not exist" in err_lower or "function does not exist" in err_lower:
+            category = "SQL_DIALECT_FUNCTION_ERROR"
+            user_env_issue = False
+            diag_summary = f"Pre-migration DDL referenced an unsupported SQL function (e.g. uuid_v4() on PostgreSQL)."
+            fix_steps = [
+                "Use native PostgreSQL gen_random_uuid() or uuid_generate_v4() instead of uuid_v4().",
+                "Update agent container to auto-heal dialect functions and re-run the execution job."
+            ]
+        elif "error rate exceeded" in err_lower:
+            category = "HIGH_ROW_ERROR_RATE"
+            user_env_issue = False
+            diag_summary = f"ETL pipeline aborted for table '{tbl}' because over 50% of records failed insertion."
+            fix_steps = [
+                "Check target database schema constraints, data types, and primary key definitions.",
+                "Review agent logs for underlying database driver notices and errors (e.g. missing target table or column type mismatch).",
+                "Ensure target tables are created prior to streaming and re-run the job."
+            ]
+        elif "cannot cast 'object' type" in err_lower or "computerror: cannot cast" in err_lower:
+            category = "SCHEMA_POLARS_TYPE_ERROR"
+            user_env_issue = False
+            diag_summary = f"Polars columnar transformation encountered unconverted Python Object/UUID columns in table '{tbl}'."
+            fix_steps = [
+                "Ensure source database driver columns (UUID/JSON) are sanitized to string before Polars cast operations.",
+                "Re-run migration using updated Docker Agent image (data-migration-agent:latest)."
             ]
         else:
             diag_summary = f"ETL pipeline encountered an unexpected error during stage '{stage}': {err_msg[:200]}"

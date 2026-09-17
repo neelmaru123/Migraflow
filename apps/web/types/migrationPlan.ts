@@ -63,6 +63,16 @@ export interface TableMappingSpec {
   column_mappings: ColumnMappingSpec[];
 }
 
+export interface RefinementFeedback {
+  applied: boolean;
+  verdict: 'applied' | 'partially_applied' | 'infeasible_rejected';
+  user_prompt?: string | null;
+  explanation: string;
+  table_count_before?: number | null;
+  table_count_after?: number | null;
+  changes_summary?: string[];
+}
+
 export interface TransformationPlanAST {
   target_database_type: string;
   ai_explanation: string;
@@ -71,6 +81,7 @@ export interface TransformationPlanAST {
   table_mappings: TableMappingSpec[];
   pre_migration_ddl: string[];
   post_migration_ddl: string[];
+  refinement_feedback?: RefinementFeedback | null;
 }
 
 export interface TargetDatabaseConfig {
@@ -86,6 +97,46 @@ export interface PlanGenerationRequest {
 
 export interface PlanRefineRequest {
   user_feedback: string;
+}
+
+export interface PlanGenerationJobResponse {
+  task_id: string;
+  agent_id: string;
+  plan_id: string;
+  status: 'processing';
+  message: string;
+}
+
+export interface PlanGenerationStatusResponse {
+  task_id: string | null;
+  agent_id: string;
+  plan_id?: string | null;
+  status: 'idle' | 'processing' | 'completed' | 'failed';
+  target_database_type?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  elapsed_seconds?: number | null;
+  error?: string | null;
+  plan?: PlanDetailResponse | null;
+}
+
+export interface PlanRefinementJobResponse {
+  task_id: string;
+  plan_id: string;
+  status: 'processing';
+  message: string;
+}
+
+export interface PlanRefinementStatusResponse {
+  task_id: string | null;
+  plan_id: string;
+  status: 'idle' | 'processing' | 'completed' | 'failed';
+  user_prompt?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  elapsed_seconds?: number | null;
+  error?: string | null;
+  plan?: PlanDetailResponse | null;
 }
 
 export interface PlanValidationResultResponse {

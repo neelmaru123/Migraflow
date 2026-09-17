@@ -12,6 +12,7 @@ from app.modules.agents.agents_dependencies import get_current_agent
 from app.modules.agents.agents_models import Agent
 from app.modules.execution.execution_schemas import (
     AgentTaskItemResponse,
+    ExecutionCancelRequest,
     ExecutionJobResponse,
     ExecutionProgressUpdate,
     ExecutionStartRequest,
@@ -40,7 +41,34 @@ async def start_plan_execution(
     Queues a MigrationJob record and notifies the assigned Docker Agent.
     """
     return await ExecutionService.create_execution_job(
-        session=session, user_id=current_user.id, plan_id=plan_id, is_dry_run=body.is_dry_run
+        session=session,
+        user_id=current_user.id,
+        plan_id=plan_id,
+        is_dry_run=body.is_dry_run,
+        truncate_target=body.truncate_target,
+    )
+
+
+@execution_router.post(
+    "/executions/{id}/cancel",
+    response_model=ExecutionJobResponse,
+    summary="Cancel an active migration or dry-run execution job",
+)
+async def cancel_execution(
+    id: UUID,
+    body: ExecutionCancelRequest = ExecutionCancelRequest(),
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Cancels an active execution job, resets the assigned agent status,
+    and unblocks the migration plan so it can be re-run immediately.
+    """
+    return await ExecutionService.cancel_execution_job(
+        session=session,
+        user_id=current_user.id,
+        job_id=id,
+        reason=body.reason,
     )
 
 
@@ -97,6 +125,7 @@ async def poll_agent_tasks(
             migration_plan_id=job.migration_plan_id,
             status=job.status,
             is_dry_run=job.is_dry_run,
+            truncate_target=job.truncate_target,
             created_at=job.created_at,
         )
         for job in jobs

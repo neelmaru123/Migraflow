@@ -50,6 +50,11 @@ class TableMerger:
         if df.is_empty():
             return start_seq
 
+        # Convert any residual pl.Object columns to pl.Utf8 to prevent DuckDB BLOB casting errors
+        for col_name, dtype in df.schema.items():
+            if dtype == pl.Object:
+                df = df.with_columns(pl.col(col_name).cast(pl.Utf8, strict=False))
+
         num_rows = len(df)
         seq_series = pl.Series("_seq_id", range(start_seq, start_seq + num_rows), dtype=pl.Int64)
         df_with_seq = df.with_columns(seq_series)

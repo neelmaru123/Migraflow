@@ -88,7 +88,42 @@ class MigrationPlanValidator:
                 clean_tbl = tbl.strip('"').split(".")[-1].lower()
                 target_tables.add(clean_tbl)
 
-        # 2. Iterate through table mappings
+        # 2. Synchronize Foreign Key & Primary Key Data Types
+        pk_type_by_table: Dict[str, str] = {}
+        for tm in ast.table_mappings:
+            for cm in tm.column_mappings:
+                if cm.is_primary_key or cm.target_column_name in ("id", "_id"):
+                    pk_type_by_table[tm.target_table_name.lower()] = (cm.target_data_type or "uuid").lower()
+
+        # Check foreign key type synchronization:
+        # If a parent table has a primary key with type 'uuid', any column in other tables
+        # referencing this entity (e.g. ending with '_id') should also have target_data_type 'uuid'
+        for tm in ast.table_mappings:
+            for cm in tm.column_mappings:
+                cname = (cm.target_column_name or "").lower()
+                if cname.endswith("_id") and not cm.is_primary_key and cname not in ("id", "_id"):
+                    base_name = cname[:-3]
+                    candidates = [
+                        base_name,
+                        f"{base_name}s",
+                        f"{base_name}es",
+                        f"{base_name[:-1]}ies" if base_name.endswith("y") else "",
+                    ]
+                    ref_table = next((cand for cand in candidates if cand and cand in pk_type_by_table), None)
+                    if ref_table and "uuid" in pk_type_by_table[ref_table]:
+                        cur_dtype = (cm.target_data_type or "").lower()
+                        if "uuid" not in cur_dtype:
+                            cm.target_data_type = "uuid"
+                            if cm.transformation_type == "direct_copy":
+                                cm.transformation_type = "type_cast"
+                                cm.ui_badge_type = "type_cast"
+                            warnings.append(
+                                f"Relational Consistency: Foreign key column '{cm.target_column_name}' in table "
+                                f"'{tm.target_table_name}' was synchronized to target type 'uuid' to match parent table "
+                                f"'{ref_table}' primary key."
+                            )
+
+        # 3. Iterate through table mappings
         for table_map in ast.table_mappings:
             target_table_name = table_map.target_table_name
             target_tables.add(target_table_name.lower())
@@ -318,6 +353,10 @@ class MigrationPlanValidator:
                 + "; ".join(errors[:3])
                 + (f" (...and {len(errors)-3} more errors)" if len(errors) > 3 else "")
             )
+
+        if isinstance(plan_ast_data, dict):
+            plan_ast_data.clear()
+            plan_ast_data.update(ast.model_dump(mode="json"))
 
         return PlanValidationResult(
             is_valid=is_valid,

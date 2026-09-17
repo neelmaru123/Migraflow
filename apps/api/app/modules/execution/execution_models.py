@@ -39,6 +39,7 @@ class MigrationJob(Base):
         String(50), default="queued", index=True, nullable=False
     )  # queued, preparing, running, paused, completed, failed, cancelled, dry_run_completed
     is_dry_run: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    truncate_target: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     progress: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     total_rows: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     processed_rows: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)

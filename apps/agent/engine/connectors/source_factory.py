@@ -47,38 +47,64 @@ class SourceConnectorFactory:
         # 1. SQL Relational Databases (PostgreSQL, MySQL, SQLite)
         if engine_type in ["postgresql", "postgres", "mysql", "mariadb", "sqlite"]:
             try:
+                import json
+                import uuid
+
                 engine = _get_engine(db_url)
                 if not pk_col and offset == 0:
                     logger.warning(
                         f"Source table '{table_or_file_name}' does not specify a primary key column. "
                         f"Falling back to OFFSET pagination which may suffer from offset drift if source table undergoes concurrent writes."
                     )
+
+                def _execute_sql_to_polars(query_str: str, query_params: dict) -> pl.DataFrame:
+                    with engine.connect() as conn:
+                        res = conn.execute(text(query_str), query_params)
+                        cols = list(res.keys())
+                        rows = res.fetchall()
+                        if not rows:
+                            return pl.DataFrame(schema={c: pl.Utf8 for c in cols})
+                        cleaned_rows = []
+                        for r in rows:
+                            row_dict = {}
+                            for col, val in zip(cols, r):
+                                if isinstance(val, (dict, list)):
+                                    row_dict[col] = json.dumps(val, default=str)
+                                elif isinstance(val, uuid.UUID):
+                                    row_dict[col] = str(val)
+                                elif isinstance(val, (bytes, bytearray)):
+                                    try:
+                                        row_dict[col] = val.decode("utf-8")
+                                    except Exception:
+                                        row_dict[col] = val.hex()
+                                else:
+                                    row_dict[col] = val
+                            cleaned_rows.append(row_dict)
+                        try:
+                            df_sql = pl.DataFrame(cleaned_rows, strict=False)
+                        except TypeError:
+                            df_sql = pl.DataFrame(cleaned_rows)
+                        if not df_sql.is_empty() and any(dt == pl.Object for dt in df_sql.schema.values()):
+                            for c, dt in df_sql.schema.items():
+                                if dt == pl.Object:
+                                    vals = [str(x) if x is not None else None for x in df_sql[c].to_list()]
+                                    df_sql = df_sql.with_columns(pl.Series(c, vals, dtype=pl.Utf8))
+                        return df_sql
+
                 if pk_col and last_pk_val is not None:
                     quoted_pk = _quote_identifier(pk_col, engine_type)
                     query = f"SELECT * FROM {quoted_table} WHERE {quoted_pk} > :last_pk ORDER BY {quoted_pk} ASC LIMIT {chunk_size}"
-                    with engine.connect() as conn:
-                        try:
-                            df = pl.read_database(query=text(query), connection=conn.connection, params={"last_pk": last_pk_val})
-                        except Exception:
-                            try:
-                                df = pl.read_database(query=text(query), connection=conn)
-                            except Exception:
-                                # Keyset fallback to OFFSET if pk_col does not exist in source table
-                                fallback_query = f"SELECT * FROM {quoted_table} LIMIT {chunk_size} OFFSET {offset}"
-                                df = pl.read_database(query=text(fallback_query), connection=conn)
+                    try:
+                        df = _execute_sql_to_polars(query, {"last_pk": last_pk_val})
+                    except Exception as pk_err:
+                        logger.warning(f"Keyset pagination error on '{quoted_table}': {pk_err}. Falling back to OFFSET.")
+                        fallback_query = f"SELECT * FROM {quoted_table} LIMIT {chunk_size} OFFSET {offset}"
+                        df = _execute_sql_to_polars(fallback_query, {})
                 else:
                     quoted_pk = _quote_identifier(pk_col, engine_type) if pk_col else None
                     order_by_clause = f" ORDER BY {quoted_pk} ASC" if quoted_pk else ""
                     query = f"SELECT * FROM {quoted_table}{order_by_clause} LIMIT {chunk_size} OFFSET {offset}"
-                    with engine.connect() as conn:
-                        try:
-                            df = pl.read_database(query=text(query), connection=conn.connection)
-                        except Exception:
-                            try:
-                                df = pl.read_database(query=text(query), connection=conn)
-                            except Exception:
-                                fallback_query = f"SELECT * FROM {quoted_table} LIMIT {chunk_size} OFFSET {offset}"
-                                df = pl.read_database(query=text(fallback_query), connection=conn)
+                    df = _execute_sql_to_polars(query, {})
 
                 has_more = len(df) == chunk_size
                 next_pk = None
@@ -134,13 +160,39 @@ class SourceConnectorFactory:
                 if not docs:
                     return pl.DataFrame(), False, last_pk_val
 
-                next_pk = str(docs[-1]["_id"]) if "_id" in docs[-1] else last_pk_val
+                from decimal import Decimal
+                from bson import ObjectId, Decimal128
+                import json
 
-                for d in docs:
-                    if "_id" in d:
-                        d["_id"] = str(d["_id"])
+                def _sanitize_doc(d: dict) -> dict:
+                    cleaned = {}
+                    for k, v in d.items():
+                        if k == "_id":
+                            cleaned["_id"] = str(v)
+                        elif isinstance(v, (Decimal128, Decimal)):
+                            try:
+                                cleaned[k] = float(v.to_decimal()) if hasattr(v, "to_decimal") else float(v)
+                            except Exception:
+                                cleaned[k] = str(v)
+                        elif isinstance(v, ObjectId):
+                            cleaned[k] = str(v)
+                        elif isinstance(v, (bytes, bytearray)):
+                            try:
+                                cleaned[k] = v.decode("utf-8")
+                            except Exception:
+                                cleaned[k] = str(v)
+                        elif isinstance(v, (dict, list)):
+                            cleaned[k] = json.dumps(v, default=str)
+                        else:
+                            cleaned[k] = v
+                    return cleaned
 
-                df = pl.DataFrame(docs)
+                next_pk = str(docs[-1]["_id"]) if (docs and "_id" in docs[-1]) else last_pk_val
+                cleaned_docs = [_sanitize_doc(d) for d in docs]
+                try:
+                    df = pl.DataFrame(cleaned_docs, strict=False)
+                except TypeError:
+                    df = pl.DataFrame(cleaned_docs)
                 has_more = len(df) == chunk_size
                 return df, has_more, next_pk
             except Exception as exc:

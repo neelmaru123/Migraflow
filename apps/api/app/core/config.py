@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "gemini-3.5-flash-lite"
     LLM_TEMPERATURE: float = 0.0
     LLM_MAX_RETRIES: int = 2
+    LLM_TIMEOUT_SECONDS: float = 360.0
 
     # LangSmith AI Observability & Error Tracing
     LANGCHAIN_TRACING_V2: str = "false"
