@@ -700,7 +700,10 @@ class ASTTransformer:
                                     v = json.loads(v)
                                 except Exception:
                                     pass
-                            res_dict[k] = v
+                            if k in ("extra_attributes", "_extra_attributes", "residual_fields", "unmapped_attributes") and isinstance(v, dict):
+                                res_dict.update(v)
+                            else:
+                                res_dict[k] = v
                 return json.dumps(res_dict, default=str) if res_dict else "{}"
 
             try:

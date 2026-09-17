@@ -1,6 +1,7 @@
 # Execution Flow — Schema Catalog Profiling, AI Migration Blueprinting & ETL Execution
 
 ## 1. Entry Point
+
 - **Files**:
   - [`apps/web/app/sources/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/sources/page.tsx)
   - [`apps/web/app/profiling/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/profiling/page.tsx)
@@ -15,6 +16,7 @@
 ## 2. Step-by-Step Execution Sequence
 
 ### Phase A: Live Agent Connection Monitoring & Catalog Introspection
+
 1. **Agent List Fetch**: `SourcesPage` invokes `agentService.listAgents()` (`GET /api/v1/agents`) to fetch registered agents.
 2. **WebSocket Subscription**: `AgentStatusBanner` connects to `ws://localhost:8000/api/v1/agents/ws/{agentId}?token={token}`.
 3. **Live Status Signals**:
@@ -25,6 +27,7 @@
    - Renders searchable list of tables, estimated row counts, column types, PK/FK attributes, and constraint definitions.
 
 ### Phase B: AI Migration Plan Generation & Transformation Blueprinting
+
 1. **Plan Generation Trigger**:
    - User configures target database dialect & optional instructions in `GeneratePlanAction`.
    - Submits `planService.createPlan(agentId, targetConfig)` (`POST /api/v1/plans`).
@@ -34,7 +37,7 @@
    - Checks active job status via `executionService.listUserExecutions()` to mount active job banner if execution is already running.
    - Renders **Execution Order Sequence Timeline** (dependency order), **Table Mapping Matrix**, and **AI Confidence Score**.
 3. **AI Plan Refinement & Feasibility Feedback Loop**:
-   - User enters natural language prompt (e.g. *"Can we do that same conversion without data loss in 12 tables?"*) in `PlanBlueprintViewer`.
+   - User enters natural language prompt (e.g. _"Can we do that same conversion without data loss in 12 tables?"_) in `PlanBlueprintViewer`.
    - Submits `planService.refinePlan(planId, prompt)` (`POST /api/v1/plans/{plan_id}/refine`).
    - `MigrationPlanService.refine_plan()` locks plan row with `with_for_update()` and delegates to `llm_plan_generator.refine()`.
    - LLM evaluates feasibility against source schemas and zero-data-loss rules.
@@ -50,6 +53,7 @@
    - Transition status to `COMPLETED` / `APPROVED`.
 
 ### Phase C: Safe ETL Job Execution & Progress Monitoring
+
 1. **Job Dispatch**:
    - `PlanBlueprintViewer` calls `executionService.startPlanExecution(planId)` (`POST /api/v1/plans/{plan_id}/execute`).
    - `ExecutionService.create_execution_job()` checks for existing active jobs (`queued`, `preparing`, `running`) on `planId` and raises HTTP `409 Conflict` if duplicate execution is attempted.
@@ -66,6 +70,7 @@
    - `check_stale_jobs()` and `check_stale_agents_and_jobs()` periodically check for orphaned `queued`, `preparing`, or `running` jobs and mark them as `failed` if the assigned agent times out.
 
 ### Phase D: AI Execution Error Diagnosis & Self-Healing Loop
+
 1. **Agent Error Dispatch**:
    - Docker Agent catches runtime exception in universal 7-phase guard in [`main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/main.py#L503-L512).
    - Dispatches `POST /api/v1/execution/jobs/{job_id}/progress` with `status: "failed"` and `error_message`.
@@ -78,6 +83,7 @@
    - User can click **`⚡ RETRY MIGRATION JOB`** to queue a fresh job attempt or switch between historical runs (`Run #1`, `Run #2`) using the run selector dropdown.
 
 ### Phase E: Docker Agent Fatal Stopping Error Reporting & UI Callout
+
 1. **Agent Error Trapping (`main.py`)**:
    - `report_fatal_error_and_exit(message, category)` is invoked upon startup failure or unhandled crash.
    - Attempts authenticated heartbeat (`status: "error"`, `error_message`, `error_category`).
@@ -95,6 +101,7 @@
    - Upon container restart with valid parameters, `process_agent_heartbeat()` clears `last_error` and `error_category`, returning status to `online`.
 
 ### Phase F: Migration Plan Versioning & Historical Rollback Sequence
+
 1. **Plan Refinement / Modification Trigger**:
    - In [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx), user inputs refinement prompt or approves blueprint.
    - Dispatches `POST /api/v1/plans/{plan_id}/refine` or `POST /api/v1/plans/{plan_id}/approve`.
@@ -112,6 +119,7 @@
    - `MigrationPlanService.rollback_to_version()` overwrites active `plan_data` on parent `MigrationPlan` with the snapshot and records a new rollback version.
 
 ### Phase G: Dynamic Agent Heartbeat Scaling, Idle Standby & Container Auto-Stop
+
 1. **Active Heartbeat Cadence**:
    - While processing or recently active, `docker-agent` in [`apps/agent/main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/main.py) sends `POST /api/v1/agents/heartbeat` every 20 seconds.
 2. **Idle Detection**:
@@ -128,6 +136,7 @@
    - Agent cleans up database connection pools and executes graceful container exit `os._exit(0)`.
 
 ### Phase H: Robust Multi-Source Merge Crash Recovery & Fail-Safe ETL Execution
+
 1. **Startup Cleanup with Active Job Preservation**:
    - Agent [`ExecutionOrchestrator.run_job()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/orchestrator.py) scans `CHECKPOINT_DIR` for `.duckdb` files.
    - Deletes stale staging files from OTHER completed/abandoned jobs, but deliberately **skips** `staging_{job_id}_*.duckdb` for the current active job ID.
@@ -147,6 +156,7 @@
    - In `run_job`'s `finally:` block, `dispose_all_engines()` from [`db.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/db.py) is called, closing and disposing all pooled SQLAlchemy engine connections.
 
 ### Phase I: Deterministic Fallback UUID Generation for Safe Migration Retries
+
 1. **Compound Seed Construction**:
    - In [`ExecutionOrchestrator.run_job()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/orchestrator.py), before invoking the transformer, constructs `retry_seed_prefix = f"{job_id}:{target_table}:{src_ident}:{src_table}"`.
    - Passes `retry_seed_prefix` alongside `row_offset=offset` into `ASTTransformer.transform_chunk()`.
@@ -155,6 +165,7 @@
    - Re-running or retrying the exact same migration job produces identical UUIDs for the same source row position, making retries idempotent against target `ON CONFLICT DO NOTHING` / `INSERT IGNORE` tables.
 
 ### Phase J: Preflight Target Table Existing Data Advisory
+
 1. **Target Table Inspection via Offline Snapshot**:
    - In [`ExecutionService.create_execution_job()`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py), before queuing execution, calls `check_target_tables_existing_data()`.
    - Locates target `DataSource` (`role in ("target", "both")`) for the agent and retrieves its latest `MetadataSnapshot` without making a live external network request from the API.
@@ -164,6 +175,7 @@
    - Warnings are attached to the `MigrationJob` instance and returned in `ExecutionJobResponse` as `target_tables_with_existing_data: list[dict]`, allowing frontend clients to show informative alerts.
 
 ### Phase K: Multi-Vector Migration Readiness Signals & Granular Confidence
+
 1. **Hierarchical Metric Derivation**:
    - In [`computePlanReadiness()`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanReadinessSignals.tsx), traverses `TransformationPlanAST.table_mappings` and `column_mappings`.
    - Computes four distinct readiness scores (0-100%): **Schema Compatibility**, **Type Compatibility**, **Relationship Mapping**, and **Data Conflict Risk**.
@@ -175,6 +187,7 @@
    - When `create_execution_job` returns `target_tables_with_existing_data`, [`JobExecutionBanner.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/JobExecutionBanner.tsx) renders an advisory warning detailing pre-populated tables and row counts.
 
 ### Phase L: Dry Run Migration Simulation Engine (End-to-End Safe Trial)
+
 1. **Triggering Simulation**:
    - User clicks `"⚡ Run Dry Run (Simulation)"` in [`PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx).
    - Frontend calls `startPlanExecution(planId, { is_dry_run: true })` hitting `POST /api/v1/plans/{id}/execute` with `{ is_dry_run: true }`.
@@ -195,18 +208,20 @@
    - Renders a secondary `"⚡ EXECUTE FOR REAL"` button allowing one-click transition to live execution.
 
 ### Phase M: Execution Monitor Checkpoint Resume vs Retry & Completed Guard
+
 1. **Failed Job State Evaluation**:
    - When `job.status === 'failed'` and `(job.processed_rows || 0) > 0`, [`JobExecutionBanner.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/JobExecutionBanner.tsx) computes `canResume = true`.
-   - The action button dynamically labels as `"⚡ RESUME"` (or `"⚡ RESUME DRY RUN"`), with a tooltip confirming: *"Checkpoints will be reused: resumes execution from {processed_rows} processed rows."*
+   - The action button dynamically labels as `"⚡ RESUME"` (or `"⚡ RESUME DRY RUN"`), with a tooltip confirming: _"Checkpoints will be reused: resumes execution from {processed_rows} processed rows."_
    - When `job.status === 'failed'` and `job.processed_rows === 0`, it displays `"⚡ RETRY MIGRATION JOB"`.
 2. **Completed Migration Action Guard**:
    - When `job.status === 'completed'`, retry execution is disabled:
      - Renders `+ CREATE NEW MIGRATION` button (linking directly to [`/profiling`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/profiling/page.tsx)).
-     - Renders disabled retry button with tooltip: *"Checkpoints will be reused when the job is completed. Create a new migration instead."*
+     - Renders disabled retry button with tooltip: _"Checkpoints will be reused when the job is completed. Create a new migration instead."_
 3. **Page-Level Navigation**:
    - [`apps/web/app/execution/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/execution/page.tsx) header includes a direct `+ Create New Migration` button alongside `Refresh Jobs`.
 
 ## 3. Impact & Delta Analysis (AI Modifications)
+
 - **[NEW]**: [`apps/api/alembic/versions/011_add_is_dry_run_to_migration_jobs.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/alembic/versions/011_add_is_dry_run_to_migration_jobs.py) - Alembic migration adding `is_dry_run` to `migration_jobs`.
 - **[NEW]**: [`apps/api/tests/unit/test_execution_dry_run.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_execution_dry_run.py) - Unit tests for dry run job creation, agent task polling, and orchestrator simulation execution.
 - **[NEW]**: [`apps/web/components/plans/PlanReadinessSignals.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanReadinessSignals.tsx) - 4-vector readiness calculation, Rollup badge, `TableReadinessBadge`, and `ColumnConfidenceBadge`.
@@ -241,10 +256,12 @@
 # Execution Flow - Generic Zero-Credential Agent Command Generation (Phase N)
 
 ## 1. Entry Point
+
 - **API Entrypoint**: `POST /api/v1/agents` or `GET /api/v1/agents/{agent_id}/docker-command` handled in [`agents_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_routes.py).
 - **Service Invocation**: `AgentCommandGenerator.generate_command_payload(agent, data_sources, raw_token)` in [`agents_command_generator.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_command_generator.py).
 
 ## 2. Step-by-Step Execution Sequence
+
 1. **Placeholder Resolution**: For each linked source/target data source, `_get_db_url_template(db_type, prefix, clean_id)` constructs the connection URL template.
 2. **Dialect Format Assembly**:
    - `postgresql`: `postgresql://<{prefix}_{clean_id}_USER>:<{prefix}_{clean_id}_PASSWORD>@<{prefix}_{clean_id}_HOST>:<{prefix}_{clean_id}_PORT>/<{prefix}_{clean_id}_NAME>`
@@ -263,11 +280,13 @@
 # Execution Flow - Agent API Token Regeneration
 
 ## 1. Entry Point
+
 - **API Endpoint**: `POST /api/v1/agents/{agent_id}/regenerate-token` in [`apps/api/app/modules/agents/agents_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_routes.py).
 - **Service Handler**: `AgentService.regenerate_agent_token()` in [`apps/api/app/modules/agents/agents_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_services.py).
 - **Security Check**: `Depends(get_verified_agent)` asserts ownership and loads linked `data_sources`.
 
 ## 2. Step-by-Step Execution Sequence
+
 1. **Request Authorization**: `get_verified_agent` extracts `agent_id`, queries the agent from the database, and validates `agent.user_id == current_user.id` (raises `403 Forbidden` on mismatch, `404 Not Found` if missing).
 2. **Token Generation & One-Way Hashing**:
    - Generates cryptographically secure token string `raw_token = f"ag_live_{secrets.token_urlsafe(32)}"`.
@@ -288,10 +307,12 @@
 # Execution Flow - Schema Catalog Foreign-Key Relationship Resolution
 
 ## 1. Entry Point
+
 - **Component**: [`SchemaCatalogViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/profiling/SchemaCatalogViewer.tsx) loaded on the Schema Profiling page (`/profiling`).
 - **Trigger**: User selects a table in the left navigation sidebar and clicks the **Relationships** tab.
 
 ## 2. Step-by-Step Execution Sequence
+
 1. **Metadata Ingestion**: The component receives `MetadataSnapshotDetailResponse` containing `snapshot.schemas` (tables and columns) and `snapshot.relationships` (foreign-key edges).
 2. **In-Memory Table Flattening**:
    ```typescript
@@ -320,10 +341,12 @@
 # Execution Flow - Dashboard Session Logout & Identity Context
 
 ## 1. Entry Point
+
 - **Component**: [`apps/web/app/dashboard/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/dashboard/page.tsx)
 - **Trigger**: User clicks the **"LOGOUT"** button in the dashboard top header actions cluster.
 
 ## 2. Step-by-Step Execution Sequence
+
 1. **User Identity Ingestion**:
    - `useAuthUser()` issues query `GET /api/v1/users/me` on initial render.
    - Syncs active user profile into Redux store (`setUser(data)`).
@@ -350,6 +373,7 @@
 # Execution Flow - Relational to MongoDB Migration with Synchronized UUIDv5 Foreign Keys & BSON Types
 
 ## 1. Entry Point
+
 - **UI Trigger**: User configures and triggers migration plan from [`apps/web/components/profiling/GeneratePlanAction.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/profiling/GeneratePlanAction.tsx) with target engine `mongodb`.
 - **API Endpoint**: `POST /api/v1/plans/generate` in [`apps/api/app/modules/migration_plans/migration_plans_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py).
 - **Execution Endpoint**: `POST /api/v1/plans/{plan_id}/execute` in [`apps/api/app/modules/execution/execution_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py).
@@ -358,6 +382,7 @@
 ## 2. Step-by-Step Execution Sequence
 
 ### Phase 1: Target Engine Auto-Detection & Prompt Formulation
+
 1. **Frontend Auto-Detection**:
    - `GeneratePlanAction` fetches agent details via `agentService.getAgent(agentId)`.
    - Finds attached data source where `role in ('target', 'both')`. If type is `mongodb`, sets `targetType = 'mongodb'`.
@@ -369,6 +394,7 @@
    - Rule 6: Whenever a parent primary key is re-keyed to `uuid`, referencing foreign keys must also be defined with `target_data_type: 'uuid'` and `transformation_type: 'type_cast'`.
 
 ### Phase 2: Deterministic FK Type Synchronization & Plan Validation
+
 1. **Plan Validation Entry**:
    - `validate_feasibility_node()` in [`migration_plans_graph.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_engine/migration_plans_graph.py) calls `MigrationPlanValidator.validate()`.
 2. **Primary Key Indexing**:
@@ -381,6 +407,7 @@
    - Updates `plan_ast_data` dictionary in-place so all persisted plans reflect this synchronized schema.
 
 ### Phase 3: Docker Agent Streaming Execution
+
 1. **Data Extraction**:
    - `SourceConnectorFactory.read_source_chunk()` reads PostgreSQL rows in cursor batches (e.g. 1,000 rows).
 2. **In-Memory Transformation ([`ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py))**:
@@ -396,6 +423,7 @@
    - `MongoTargetWriter.bulk_load()` executes `collection.bulk_write([InsertOne(doc) for doc in chunk])` into MongoDB.
 
 ## 3. Impact & Delta Analysis (AI Modifications)
+
 - **[MODIFIED]**: [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py)
   - Added deterministic UUIDv5 transformation for columns with `target_data_type == 'uuid'` or `is_foreign_key_to_uuid` in both `direct_copy` and `type_cast`.
   - Added null preservation for nullable foreign keys.
@@ -420,10 +448,12 @@
 # Execution Flow — Multi-Source Lineage Stamping & DuckDB Deduplication
 
 ## 1. Entry Point
+
 - **File**: [`apps/agent/engine/orchestrator.py:L230`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/orchestrator.py#L230)
 - **Trigger**: Execution loop processing a multi-source target table (e.g., `customers` merged from `src_db_1.customers` and `src_db_2.legacy_customers`).
 
 ## 2. Step-by-Step Execution Sequence
+
 1. **Source Identification**:
    - `orchestrator.py` extracts raw chunks from each configured source table.
    - Formats lineage identifier: `src_origin_tag = f"{src_ident}.{src_table}" if src_ident else str(src_table)`.
@@ -439,6 +469,7 @@
    - Since `_source_origin` contains canonical strings (`'src_db_1.customers'`, `'src_db_2.legacy_customers'`), PostgreSQL's `NOT NULL` constraint is satisfied cleanly.
 
 ## 3. Impact & Delta Analysis (AI Modifications)
+
 - **[MODIFIED]**: [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py)
   - Added `source_origin: Optional[str] = None` parameter to `transform_chunk()`.
   - Added interceptor for `target_col == "_source_origin"` in `transform_chunk` and `_unresolved_expr`.
@@ -452,10 +483,12 @@
 # Execution Flow — Asynchronous AI Plan Refinement Background Execution
 
 ## 1. Entry Point
+
 - **File**: [`apps/api/app/modules/migration_plans/migration_plans_routes.py:L205`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py#L205)
-- **Trigger**: User inputs a natural language prompt (e.g., *"Convert status int enum to string varchar"*) in [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) and submits the form.
+- **Trigger**: User inputs a natural language prompt (e.g., _"Convert status int enum to string varchar"_) in [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) and submits the form.
 
 ## 2. Step-by-Step Execution Sequence
+
 1. **Frontend Dispatch**:
    - `handleRefinePlan()` in [`PlanBlueprintViewer.tsx:L270`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx#L270) invokes `planService.startRefinement(plan.id, promptText)`.
    - UI immediately sets `isRefining = true`, records prompt echo, initializes elapsed timer at 0s, and displays the cyber-dark Refinement Progress Banner.
@@ -482,6 +515,7 @@
    - Disables `isRefining`, updates React state (`plan`, `editableAst`), displays success toast (or feasibility alert), re-fetches version history, and smoothly scrolls to `RefinementFeedbackCard`.
 
 ## 3. Impact & Delta Analysis (AI Modifications)
+
 - **[NEW]**: [`apps/api/tests/unit/test_plan_refine_async.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_plan_refine_async.py)
   - Full end-to-end integration test of async 202 launch, polling status, background execution, and version creation.
 - **[MODIFIED]**: [`apps/api/app/core/config.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/core/config.py)
@@ -505,12 +539,14 @@
 # Execution Flow — Asynchronous AI Initial Plan Generation Background Execution
 
 ## 1. Entry Point
+
 - **File**: [`apps/api/app/modules/migration_plans/migration_plans_routes.py:L114`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py#L114)
 - **Trigger**: User configures target database dialect and optional instructions in [`apps/web/components/profiling/GeneratePlanAction.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/profiling/GeneratePlanAction.tsx) and clicks **"GENERATE AI MIGRATION PLAN"**.
 
 ## 2. Step-by-Step Execution Sequence
 
 ### Phase 1: Frontend Ingestion & Immediate 202 Launch
+
 1. **User Action**:
    - User reviews schema catalog on `/sources?agentId=...` or `/profiling?agentId=...`.
    - Clicks **"GENERATE AI MIGRATION PLAN"** in `GeneratePlanAction.tsx`.
@@ -530,6 +566,7 @@
    - Returns HTTP `202 Accepted` with `PlanGenerationJobResponse` containing `task_id`, `agent_id`, `plan_id`, and `status = "processing"` in ~200ms.
 
 ### Phase 2: Detached Background Blueprint Generation
+
 1. **Isolated Database Session**:
    - `_run_plan_generation_background()` opens a dedicated `AsyncSessionLocal()`, completely detached from the caller HTTP connection and immune to browser client disconnects.
 2. **Core Generation Execution (`execute_generation_core`)**:
@@ -546,6 +583,7 @@
    - If an unhandled exception or LLM timeout occurs, catches error, marks `plan.status = "draft_failed"`, commits the rollback status, and sets `GenerationTaskManager.fail_task()`.
 
 ### Phase 3: Client Polling & Browser Refresh Resilience
+
 1. **Mount-Time Active Job Detection**:
    - On initial render or browser reload (`F5`), `useEffect` in `GeneratePlanAction.tsx` queries `planService.getGenerationStatus(agentId)` (`GET /api/v1/plans/agent/{agent_id}/generation-status`).
    - If the backend returns `status === 'processing'` or the agent has a plan with `status === 'generating'`, the UI seamlessly restores:
@@ -561,6 +599,7 @@
    - The user seamlessly lands on the Plan Blueprint Viewer with the completed AI blueprint, version history (v1), and readiness metrics.
 
 ## 3. Impact & Delta Analysis (AI Modifications)
+
 - **[NEW]**: [`apps/api/tests/unit/test_plan_generate_async.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_plan_generate_async.py)
   - Unit and integration tests covering 202 Accepted async plan generation, 409 Conflict duplicate guards, polling endpoint status progression, and initial v1 plan version persistence.
 - **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_schemas.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_schemas.py)
@@ -591,10 +630,12 @@
 # Execution Flow — Target Database Engine Locking & Zero Divergence
 
 ## 1. Entry Point
+
 - **Component**: [`GeneratePlanAction.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/profiling/GeneratePlanAction.tsx) rendered on `/sources` and `/profiling`.
 - **Backend Service**: `start_async_generation()` and `execute_generation_core()` in [`migration_plans_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py).
 
 ## 2. Step-by-Step Execution Sequence
+
 1. **Agent Metadata & Target Data Source Resolution**:
    - `GeneratePlanAction` fetches the agent's attached data sources via `agentService.getAgent(agentId)`.
    - Locates target DataSource: `agentData.data_sources.find(ds => ds.role === 'target' || ds.role === 'both')`.
@@ -617,6 +658,7 @@
 # Execution Flow — Target Database Auto-Creation & Clean Wipe Safety System
 
 ## 1. Entry Point
+
 - **Frontend Trigger**: "APPROVE & EXECUTE MIGRATION" button in [`PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx).
 - **Agent Initialization**: `sync_metadata_snapshots` in [`apps/agent/main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/main.py).
 - **Backend API**: `POST /api/v1/plans/{plan_id}/execute` in [`execution_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py).
@@ -624,6 +666,7 @@
 ## 2. Step-by-Step Execution Sequence
 
 ### Phase 1: Target Database Auto-Creation (Multi-Engine)
+
 1. **Introspection & Boot Check**:
    - During Docker Agent boot or periodic metadata sync, `AgentMetadataEngine.introspect_database()` detects target/destination databases (`DEST_*_URL`).
    - Invokes `DDLExecutor._ensure_database_exists(sync_url)`.
@@ -635,10 +678,11 @@
    - The agent successfully inspects the new, empty database and registers an empty snapshot payload (`total_tables: 0, total_rows: 0`) in the control plane database without failing with connection errors.
 
 ### Phase 2: Pre-Flight Safety Confirmation in Web UI
+
 1. **User Clicks "APPROVE & EXECUTE MIGRATION"**:
    - Opens the Pre-Migration Execution Check modal instead of immediately firing execution.
 2. **Clean Wipe Agreement Checkbox**:
-   - User can check *"Clean Wipe Target Database (Delete & Drop Existing Tables)"*.
+   - User can check _"Clean Wipe Target Database (Delete & Drop Existing Tables)"_.
    - Explicit agreement text warns of permanent, irreversible data loss.
 3. **Warning When Clean Wipe Unselected**:
    - If Clean Wipe is unchecked and destination tables contain data, displays amber warning alerting the user that incoming records will be appended with `ON CONFLICT DO NOTHING`.
@@ -646,6 +690,7 @@
    - Submits `POST /api/v1/plans/{plan_id}/execute` with `{ truncate_target: true/false }`.
 
 ### Phase 3: Agent Clean Wipe & Execution
+
 1. **Agent Polls Task**:
    - `GET /api/v1/agents/tasks` returns `truncate_target` flag.
 2. **Pre-Flight Inspection**:
@@ -666,10 +711,12 @@
 ## 4. Execution Flow — Job Cancellation & Deadlock Reset Feature
 
 ### Entry Points:
+
 - **UI**: "Cancel Execution" button in `JobExecutionBanner.tsx` on `/transformation-plan?planId=...` or `/execution?jobId=...`.
 - **API**: `POST /api/v1/executions/{id}/cancel`
 
 ### Step-by-Step Sequence:
+
 1. **User Cancellation Trigger**:
    - During an active run (`running`, `queued`, `preparing`), user clicks **"Cancel Execution"** on `JobExecutionBanner`.
    - Opens confirmation modal with warning and optional audit reason input.
@@ -694,6 +741,7 @@
 ## 5. Execution Flow — Transformation Blueprint 3-Tab Progressive Disclosure Workflow
 
 ### Entry Points:
+
 - **UI Route**: [`apps/web/app/transformation-plan/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/transformation-plan/page.tsx)
 - **URL Syntax**: `/transformation-plan?planId={plan_id}&tab={overview|mappings|execute}`
 - **Default Fallback**: `tab=overview`
@@ -701,11 +749,13 @@
 ### Step-by-Step Sequence:
 
 #### 1. Tab Bar Navigation & Routing
+
 - `PlanTabBar.tsx` reads current query parameter `?tab=...` via `useSearchParams()`.
 - On tab click, updates URL query parameters via `router.push('/transformation-plan?planId=...&tab=...')` without reloading the page.
 - Renders dynamic badges: table count `[14]` on Mappings tab, readiness pill `[Ready]` / `[Issues]` on Overview, and `[Running]` / `[Blocked]` on Execute tab.
 
 #### 2. Tab 1: Overview & Strategy (`PlanOverviewTab.tsx`)
+
 1. **AI Feasibility Signals**: Computes 4 readiness vectors (Schema, Type, Relationship, Data Conflict Risk) via `computePlanReadiness()`.
 2. **Plain Language Summary**: Displays human-readable narrative explaining table count, merge operations, and primary key re-keying.
 3. **AI Execution Strategy**: Explains architectural decisions (e.g. why tables were kept separate or merged).
@@ -714,6 +764,7 @@
 6. **Version History Timeline**: Visual list of all previous generation and refinement versions with 1-click snapshot preview and rollback buttons.
 
 #### 3. Tab 2: Table Mapping Workspace (`PlanTableMappingsTab.tsx`)
+
 1. **Search & Filter Controls**:
    - Live text search across target table names, source tables, and column names.
    - Type filter (`direct_copy`, `merge`, `split_target`).
@@ -726,6 +777,7 @@
    - Saving dispatches `PUT /api/v1/plans/{plan_id}` and triggers immediate backend re-validation.
 
 #### 4. Tab 3: Execution Control & Monitoring (`PlanExecuteTab.tsx`)
+
 1. **Readiness Gate**:
    - If `!plan.is_valid`, blocks execution buttons and displays a prominent warning card with a direct link back to Overview diagnostics.
 2. **Target Database Overview**: Summarizes target dialect, destination identifier, and table counts.
@@ -737,6 +789,7 @@
    - **Execute Migration**: Opens safety confirmation modal with optional **Clean Wipe** (`truncate_target`) checkbox before dispatching execution.
 
 ### Impact & Delta Analysis:
+
 - **[NEW]**: [`PlanTabBar.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanTabBar.tsx) — URL-synced sticky tab navigation.
 - **[NEW]**: [`PlanOverviewTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanOverviewTab.tsx) — High-level strategy, readiness signals, AI refinement, and version history.
 - **[NEW]**: [`PlanTableMappingsTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanTableMappingsTab.tsx) — Searchable/filterable schema mapping matrix and AST editor.
@@ -748,6 +801,7 @@
 # Execution Flow — Post-Migration Container Lifecycle & Safe Re-Execution Guard
 
 ## 1. Entry Point
+
 - **Files**:
   - [`apps/api/app/modules/execution/execution_services.py:start_plan_execution()`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py)
   - [`apps/web/components/plans/PlanExecuteTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanExecuteTab.tsx)
@@ -760,24 +814,28 @@
 ## 2. Step-by-Step Execution Sequence
 
 ### 1. Job Completion & Graceful Container Shutdown (Option A)
+
 1. **Completion Signal**: Docker Agent finishes streaming target records and reports `status = "completed"` to `POST /api/v1/execution/jobs/{job_id}/progress`.
 2. **Shutdown Directive**: On the next heartbeat ping, `process_agent_heartbeat()` identifies a recently completed job (`<= 120s`) and issues action directive `SHUTDOWN`.
 3. **Agent Clean Exit**: Docker Agent logs `[OPTION A] Backend issued SHUTDOWN directive`, sends final heartbeat with `status = "offline"`, and terminates process with `sys.exit(0)`.
 4. **Database State**: Agent record in PostgreSQL retains `status = "offline"`, `last_error = None`, `error_category = None`.
 
 ### 2. Frontend Completion Recognition & Re-Run UX
+
 1. **State Evaluation**: `PlanExecuteTab.tsx` evaluates `isMigrationCompleted = Boolean((activeJob && activeJob.status === 'completed' && !activeJob.is_dry_run) || plan.status === 'completed')`.
 2. **Success Callout**: Renders green `Target Migration Completed Successfully` card confirming all target tables were written.
 3. **Action Re-labeling**: The primary action button transitions to `⚡ RE-RUN MIGRATION` with distinct secondary styling rather than presenting an ambiguous pending state.
 4. **Safety Confirmation Modal**: Clicking opens `PlanBlueprintViewer.tsx` modal which warns that the migration has already completed once and advises considering Clean Wipe to prevent duplicate records.
 
 ### 3. Backend Offline Protection & Watchdog Safety
+
 1. **Execution Gate**: When `POST /api/v1/plans/{plan_id}/execute` is received, `ExecutionService.start_plan_execution()` inspects the assigned agent.
 2. **Status Guard**: Checks `if agent.status in ("error", "offline")` alongside `last_seen_at < cutoff`. Even if the agent container shut down seconds ago, the `"offline"` status immediately triggers HTTP `503 Service Unavailable` with a descriptive message prompting the user to start the container.
 3. **Preserved State**: `ExecutionService` clears `idle_since` but **never** forcibly mutates `agent.status = "online"`. Only a verified incoming heartbeat from a running container can restore online status.
 4. **Watchdog Neutrality**: The 20-second `stale_agent_watchdog` only scans agents whose status is actively in `["online", "busy", "degraded"]`. Cleanly offline agents are skipped, preventing false-positive `FATAL STOPPING ERROR [DISCONNECTED UNEXPECTEDLY]` alarms.
 
 ## 3. Impact & Delta Analysis
+
 - **[MODIFIED]**: [`execution_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py) — Added `agent.status in ("error", "offline")` gate and removed forced online mutation on offline agents.
 - **[MODIFIED]**: [`PlanExecuteTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanExecuteTab.tsx) — Added `isMigrationCompleted` success callout, re-run button state, and secondary styling.
 - **[MODIFIED]**: [`PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) — Added re-run context warning in execution confirmation modal.
@@ -788,10 +846,12 @@
 # Execution Flow — Complex NoSQL Database Provisioning (`complex_nosql_enterprise`)
 
 ## 1. Entry Point
+
 - **File**: [`scripts/seed_complex_nosql.py`](file:///d:/GitHub/Ai_data_migration_platform/scripts/seed_complex_nosql.py)
 - **Trigger**: CLI invocation via `poetry run python ../../scripts/seed_complex_nosql.py` or automated benchmark testing harness.
 
 ## 2. Step-by-Step Execution Sequence
+
 1. **Connection & Teardown**:
    - Connects to local MongoDB daemon on `mongodb://localhost:27017/`.
    - Calls `client.drop_database("complex_nosql_enterprise")` to guarantee an idempotent fresh schema state.
@@ -809,6 +869,7 @@
    - Generates 200 telemetry events with mixed types for `payload.verification_code` (`int`, `str`, `dict`, `bool`, `list`) and native BSON `Regex` objects.
 
 ## 3. Impact & Delta Analysis
+
 - **[NEW]**: [`scripts/seed_complex_nosql.py`](file:///d:/GitHub/Ai_data_migration_platform/scripts/seed_complex_nosql.py) — Standalone production-grade complex NoSQL database seeder.
 - **[UNCHANGED]**: Core API server, Next.js frontend, Docker agent execution engine.
 
@@ -817,6 +878,7 @@
 # Execution Flow — NoSQL-to-Relational ETL Hardening & Polymorphic Coercion
 
 ## 1. Entry Point
+
 - **Files**:
   - [`apps/agent/engine/ddl_executor.py:DDLExecutor.execute_ddl()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/ddl_executor.py)
   - [`apps/agent/engine/transformers/ast_transformer.py:ASTTransformer.transform()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py)
@@ -828,12 +890,14 @@
 ## 2. Step-by-Step Execution Sequence
 
 ### 1. DDL Execution & Dialect Sanitization
+
 1. **Pre-Execution Sanitization**: `DDLExecutor._sanitize_sql()` strips invalid markdown fences and replaces non-standard dialect functions (e.g. `uuid_v4()` $\rightarrow$ `gen_random_uuid()` for PostgreSQL).
 2. **Execution Attempt**: Statement is dispatched to target database via SQLAlchemy engine connection.
 3. **Runtime Auto-Healing Retry**: If PostgreSQL returns `UndefinedFunctionError` mentioning `uuid_v4`, the executor catches the error, replaces `uuid_v4()` with `gen_random_uuid()`, and re-executes immediately.
 4. **Benign Error Filtering**: Non-fatal warnings (e.g. table already exists) are safely suppressed without masking critical table creation syntax errors.
 
 ### 2. AST Transformation & Polars LazyFrame Processing
+
 1. **Column Disambiguation**: `ASTTransformer.transform()` inspects Polars expressions. Using `isinstance(item, pl.Expr)` and `item.meta.output_name()`, it identifies duplicate columns and merges explicitly mapped `extra_attributes` catch-all fields with unmapped residual fields into a unified expression.
 2. **Polymorphic Boolean Parsing**: For target columns defined as `BOOLEAN NOT NULL`, `_parse_bool()` coerces heterogeneous values:
    - Booleans (`True`/`False`) pass through unchanged.
@@ -842,11 +906,13 @@
 3. **Nested Dot-Path Promotion**: When promoting nested NoSQL fields (e.g. `architecture.firmware_version`), `nosql_field_promote` traverses the nested JSON structure, unpacks sub-keys, and guarantees safe non-null fallback values.
 
 ### 3. Target Loading & AI Error Diagnosis
+
 1. **Bulk Insertion**: Cleanly transformed Polars LazyFrames are written to target PostgreSQL tables in chunked bulk batches with zero row skips.
 2. **Post-Migration DDL**: Target indexes and constraints are created.
 3. **Observability**: If errors occur, `ExecutionService.diagnose_failure()` categorizes the issue into actionable diagnostic categories (`SQL_DIALECT_FUNCTION_ERROR`, `TARGET_TABLE_MISSING`, `HIGH_ROW_ERROR_RATE`) and suggests immediate fixes in the UI.
 
 ## 3. Impact & Delta Analysis
+
 - **[MODIFIED]**: [`apps/agent/engine/ddl_executor.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/ddl_executor.py) — PostgreSQL DDL sanitization, auto-healing retry, and refined error suppression.
 - **[MODIFIED]**: [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py) — Polars LazyFrame expression name deduplication, `_parse_bool` polymorphic coercion, and nested dot-path extraction.
 - **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_engine/migration_plans_llm.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_engine/migration_plans_llm.py) — Enforced `gen_random_uuid()` rule in LLM prompt.
@@ -859,6 +925,7 @@
 # Execution Flow — Post-Migration UI Lifecycle & Re-Execution Prevention
 
 ## 1. Entry Point
+
 - **Files**:
   - [`apps/web/app/execution/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/execution/page.tsx)
   - [`apps/web/components/plans/PlanExecuteTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanExecuteTab.tsx)
@@ -869,11 +936,13 @@
 ## 2. Step-by-Step Execution Sequence
 
 ### 1. Execution Monitor Lifecycle (`/execution`)
+
 1. **Job List Query**: `fetchExecutions()` fetches all user jobs from `GET /api/v1/execution/jobs`.
 2. **Action Header Sanitization**: Top header presents only the `Refresh Jobs` action. The previous duplicate `+ Create New Migration` button is removed.
 3. **Selected Job Banner**: Renders `JobExecutionBanner` for the selected job. When `isRealCompleted === true`, secondary generation links are stripped.
 
 ### 2. Transformation Blueprint Execution Tab (`/transformation-plan?tab=execute`)
+
 1. **Plan & Job State Inspection**: `PlanExecuteTab` computes `isMigrationCompleted = Boolean((activeJob && activeJob.status === 'completed' && !activeJob.is_dry_run) || plan.status === 'completed')`.
 2. **Action Gate Enforcement**:
    - If `isMigrationCompleted === true`:
@@ -884,6 +953,7 @@
      - Renders the `⚡ Run Dry Run (Simulation)` and `APPROVE & EXECUTE MIGRATION` buttons for active/pending plans.
 
 ## 3. Impact & Delta Analysis
+
 - **[MODIFIED]**: [`apps/web/app/execution/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/execution/page.tsx) — Removed `+ Create New Migration` button from header.
 - **[MODIFIED]**: [`apps/web/components/plans/JobExecutionBanner.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/JobExecutionBanner.tsx) — Removed post-completion `Create New Migration` button.
 - **[MODIFIED]**: [`apps/web/components/plans/PlanExecuteTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanExecuteTab.tsx) — Replaced action buttons with locked badge when migration is completed.
@@ -894,6 +964,7 @@
 # Execution Flow — Polars Object Type Sanitization & Target Engine Hardening
 
 ## 1. Entry Point
+
 - **Files**:
   - [`apps/agent/engine/connectors/source_factory.py:SourceConnectorFactory.read_source_chunk()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/connectors/source_factory.py)
   - [`apps/agent/engine/transformers/ast_transformer.py:ASTTransformer.transform_chunk()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py)
@@ -904,11 +975,13 @@
 ## 2. Step-by-Step Execution Sequence
 
 ### 1. Source Chunk Extraction & Early Object Sanitization
+
 1. **Database Extraction**: `SourceConnectorFactory.read_source_chunk()` executes SQL query using `pl.read_database()`.
 2. **Object Detection**: Scans DataFrame columns for `col_dtype == pl.Object` (e.g., Python `uuid.UUID` or `dict` objects returned by `psycopg2`).
 3. **String Coercion**: Extracts column to Python list via `[str(x) if x is not None else None for x in df[col].to_list()]` and rebuilds `pl.Series(col, vals, dtype=pl.Utf8)`.
 
 ### 2. AST Transformation & Vectorized Expressions
+
 1. **Entry Normalization**: At the start of `ASTTransformer.transform_chunk()`, checks `df.schema` for any remaining `pl.Object` columns and converts them safely to `pl.Utf8`.
 2. **Primary Key Strategies (`prefix_id` & `uuid_v5`)**:
    - Instead of calling `.cast(pl.Utf8)` on source series, extracts strings using `[str(v) if v is not None else "" for v in df[col].to_list()]`.
@@ -917,10 +990,12 @@
    - For MongoDB targets, converts UUID strings to native strings, promotes `id` to `_id`, and packs residual fields into JSON structures.
 
 ### 3. Target DDL & Connection Verification Fallback
+
 1. **Target Preflight Check**: `DDLExecutor` attempts connection to target MongoDB via `MongoClient`.
 2. **Unauthenticated Fallback**: If an authentication error (`OperationFailure: Authentication failed`) occurs, strips credentials from the URL and reconnects cleanly to unauthenticated instances.
 
 ## 3. Impact & Delta Analysis
+
 - **[MODIFIED]**: [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py) — Added early `pl.Object` normalization and list-comprehension string extraction for `prefix_id` and `uuid_v5`.
 - **[MODIFIED]**: [`apps/agent/engine/connectors/source_factory.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/connectors/source_factory.py) — Replaced raw `pl.read_database` with `_execute_sql_to_polars` handling heterogeneous JSON and arrays.
 - **[MODIFIED]**: [`apps/agent/engine/writers/target_writer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py) — Categorized MongoDB code 11000 duplicate keys as `skipped_rows` during migration resumption.
@@ -932,6 +1007,7 @@
 # Execution Flow — Heterogeneous SQL Column Extraction & MongoDB Resumption
 
 ## 1. Entry Point
+
 - **Files**:
   - [`apps/agent/engine/connectors/source_factory.py:SourceConnectorFactory.read_source_chunk()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/connectors/source_factory.py)
   - [`apps/agent/engine/writers/target_writer.py:TargetWriterFactory.bulk_load()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py)
@@ -941,6 +1017,7 @@
 ## 2. Step-by-Step Execution Sequence
 
 ### 1. In-Memory Sanitized SQL Cursor Extraction (`_execute_sql_to_polars`)
+
 1. **Query Execution**: Executes `SELECT * FROM table ...` via SQLAlchemy connection.
 2. **Row Sanitization**:
    - Encounters polymorphic types (e.g. `['CODE_ALPHA', 'CODE_BETA', 404]`).
@@ -950,10 +1027,12 @@
 4. **Object Dtype Normalization**: Ensures any remaining `pl.Object` columns are normalized to `pl.Utf8`.
 
 ### 2. AST Transformation & Primary Key Generation
+
 1. `ASTTransformer.transform_chunk()` processes mapped columns with `keep_original`, `prefix_id`, or `uuid_v5` primary key strategies.
 2. Captures unmapped residual fields into `extra_attributes`.
 
 ### 3. MongoDB Idempotent Bulk Insertion
+
 1. Transformed documents are sent to MongoDB via `collection.insert_many(rows, ordered=False)`.
 2. When resuming a previously interrupted job:
    - Existing documents raise `BulkWriteError` with error `code: 11000` (`duplicate key`).
@@ -961,12 +1040,58 @@
    - Migration completes successfully with accurate row counts.
 
 ## 3. Impact & Delta Analysis
+
 - **[MODIFIED]**: [`apps/agent/engine/connectors/source_factory.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/connectors/source_factory.py) — In-memory sanitized SQL cursor extraction.
 - **[MODIFIED]**: [`apps/agent/engine/writers/target_writer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py) — MongoDB duplicate key classification as `skipped_rows`.
 - **[MODIFIED]**: [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py) — Updated object cleanup in fallback pass-through.
 
+---
 
+# Execution Flow - Universal Object Unpacking & BSON Deserialization for MongoDB Target
 
+## 1. Entry Point
+- **File**: [`apps/agent/engine/writers/target_writer.py:L14`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py#L14)
+- **Trigger**: `TargetWriterFactory.bulk_load()` invoked during ETL data streaming when `engine_type in ("mongodb", "mongo")`.
 
+## 2. Step-by-Step Execution Sequence
 
+```mermaid
+sequenceDiagram
+    participant SF as SourceConnectorFactory
+    participant AST as ASTTransformer
+    participant TW as TargetWriterFactory
+    participant Mongo as MongoDB Target
+
+    SF->>SF: Read chunk from SQL (Postgres / MySQL)
+    SF->>AST: Stream Polars DataFrame (JSON columns as Utf8)
+    AST->>AST: Transform columns & flatten residual dicts in _serialize_residual()
+    AST->>TW: Pass transformed DataFrame
+    TW->>TW: _sanitize_rows_for_target(rows, "mongodb")
+    Note over TW: 1. Recursive JSON deserialization (_sanitize_value_for_mongo)<br/>2. Convert ISO dates -> datetime & decimals -> Decimal128<br/>3. Unpack residual containers (extra_attributes) into root<br/>4. Promote id -> _id
+    TW->>Mongo: collection.insert_many(rows, ordered=False)
+```
+
+1. **SQL Chunk Extraction (`SourceConnectorFactory`)**:
+   - Reads source rows from PostgreSQL (JSONB/JSON) or MySQL (JSON/TEXT).
+   - In-memory rows maintain JSON-serialized representation in Polars DataFrame.
+2. **In-Memory Transformation (`ASTTransformer`)**:
+   - In `_serialize_residual()`, captures unmapped residual fields while flattening any existing residual dictionary wrappers (avoiding nested `{"extra_attributes": {"extra_attributes": ...}}`).
+3. **MongoDB Row Sanitization & Unpacking (`_sanitize_rows_for_target`)**:
+   - `_sanitize_value_for_mongo()`:
+     - Recursively parses stringified JSON (`{...}` / `[...]`) into native Python dicts and lists.
+     - Recursively casts ISO-8601 strings to `datetime` objects and numeric strings / Decimals to `bson.Decimal128`.
+   - Residual Container Promotion:
+     - Inspects for residual keys (`extra_attributes`, `_extra_attributes`, `residual_fields`, `unmapped_attributes`).
+     - Extracts nested key-value pairs and merges them into document root (only where root is not already populated).
+     - Removes the wrapper column name.
+   - Primary Key Promotion:
+     - Promotes `id` $\rightarrow$ `_id`.
+4. **Native Document Ingestion (`TargetWriterFactory`)**:
+   - Sends rich, native BSON documents directly to PyMongo `collection.insert_many()`.
+
+## 3. Impact & Delta Analysis
+
+- **[MODIFIED]**: [`apps/agent/engine/writers/target_writer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py) — Added recursive `_sanitize_value_for_mongo()`, residual container promotion, and primary key promotion for MongoDB targets.
+- **[MODIFIED]**: [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py) — Added residual dictionary flattening in `_serialize_residual()` to prevent multi-hop double wrapping.
+- **[NEW]**: [`apps/agent/tests/test_mongo_object_unpacking.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/tests/test_mongo_object_unpacking.py) — Unit test suite verifying PostgreSQL & MySQL JSON unpacking, BSON conversions, and SQL target safety.
 

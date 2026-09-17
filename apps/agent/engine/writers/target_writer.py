@@ -21,13 +21,19 @@ def _sanitize_rows_for_target(rows: list, engine_type: str) -> list:
     - bytes               → hex string
     - set / frozenset     → sorted list, then JSON / pg-array
     - dict / list         → JSON string (MySQL/SQLite) or pg-array literal (PostgreSQL lists)
-    - MongoDB: dicts/lists → native Python objects (pymongo handles them)
+    - MongoDB:
+      - Deserializes JSON strings into native Python dicts/lists
+      - Converts ISO datetime strings to native datetime
+      - Converts numeric Decimals to bson.Decimal128
+      - Promotes residual container objects (e.g. 'extra_attributes') to document root
+      - Promotes 'id' to '_id'
     """
     import json
     import re
     import uuid
     from datetime import datetime, timezone
     from decimal import Decimal
+    from typing import Any
 
     if not rows:
         return rows
@@ -62,76 +68,118 @@ def _sanitize_rows_for_target(rows: list, engine_type: str) -> list:
             return f'"{s}"'
         return "{" + ",".join(_escape(e) for e in lst) + "}"
 
+    def _sanitize_value_for_mongo(val: Any) -> Any:
+        """Recursively parses JSON and sanitizes values into native BSON types."""
+        if val is None:
+            return None
+        if isinstance(val, str):
+            v_str = val.strip()
+            v_upper = v_str.upper()
+            if v_upper in SQL_NOW_LITERALS:
+                return datetime.now(timezone.utc)
+            if v_str in ("0000-00-00 00:00:00", "0000-00-00"):
+                return None
+            # Check if it is a JSON object or array (from PostgreSQL JSONB, MySQL JSON, or SQLite JSON)
+            if (v_str.startswith("{") and v_str.endswith("}")) or (v_str.startswith("[") and v_str.endswith("]")):
+                try:
+                    parsed = json.loads(v_str)
+                    return _sanitize_value_for_mongo(parsed)
+                except Exception:
+                    pass
+            # Check ISO-8601 datetime pattern
+            if re.match(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}", v_str):
+                try:
+                    return datetime.fromisoformat(v_str.replace("Z", "+00:00"))
+                except Exception:
+                    pass
+            # Check decimal/float string
+            if re.match(r"^-?\d+\.\d+$", v_str):
+                try:
+                    from bson import Decimal128
+                    return Decimal128(v_str)
+                except Exception:
+                    return float(v_str)
+            return val
+        elif isinstance(val, dict):
+            return {k: _sanitize_value_for_mongo(v) for k, v in val.items()}
+        elif isinstance(val, (list, tuple, set, frozenset)):
+            return [_sanitize_value_for_mongo(elem) for elem in val]
+        elif isinstance(val, uuid.UUID):
+            return str(val)
+        elif isinstance(val, datetime):
+            return val
+        elif isinstance(val, Decimal):
+            try:
+                from bson import Decimal128
+                return Decimal128(str(val))
+            except Exception:
+                return float(val)
+        elif isinstance(val, bytes):
+            try:
+                return val.decode("utf-8")
+            except Exception:
+                return val.hex()
+        return val
+
     sanitized = []
     for r in rows:
         clean_row = {}
-        for k, v in r.items():
-            if v is None:
-                clean_row[k] = None
-            elif isinstance(v, str):
-                v_str = v.strip()
-                v_upper = v_str.upper()
-                if v_upper in SQL_NOW_LITERALS:
-                    clean_row[k] = datetime.now(timezone.utc) if is_mongo else datetime.now(timezone.utc).isoformat()
-                elif v_str in ("0000-00-00 00:00:00", "0000-00-00"):
-                    clean_row[k] = None
-                elif is_mongo and re.match(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}", v_str):
-                    try:
-                        clean_row[k] = datetime.fromisoformat(v_str.replace("Z", "+00:00"))
-                    except Exception:
-                        clean_row[k] = v
-                elif is_mongo and re.match(r"^-?\d+\.\d+$", v_str):
-                    try:
-                        from bson import Decimal128
-                        clean_row[k] = Decimal128(v_str)
-                    except Exception:
-                        clean_row[k] = float(v_str)
-                else:
-                    clean_row[k] = v
-            elif isinstance(v, uuid.UUID):
-                clean_row[k] = str(v)
-            elif isinstance(v, datetime):
-                if is_mongo:
-                    clean_row[k] = v
-                else:
-                    clean_row[k] = v.isoformat()
-            elif isinstance(v, Decimal):
-                if is_mongo:
-                    try:
-                        from bson import Decimal128
-                        clean_row[k] = Decimal128(str(v))
-                    except Exception:
-                        clean_row[k] = float(v)
-                else:
-                    clean_row[k] = str(v)
-            elif isinstance(v, bytes):
-                clean_row[k] = v.hex()
-            elif isinstance(v, (set, frozenset)):
-                lst = sorted(str(e) for e in v)
-                if is_mongo:
-                    clean_row[k] = lst
-                elif is_postgres:
-                    clean_row[k] = _pg_array_literal(lst)
-                else:
-                    clean_row[k] = json.dumps(lst, ensure_ascii=False, default=str)
-            elif isinstance(v, list):
-                if is_mongo:
-                    clean_row[k] = v
-                elif is_postgres:
-                    clean_row[k] = _pg_array_literal(v)
-                else:
-                    clean_row[k] = json.dumps(v, ensure_ascii=False, default=str)
-            elif isinstance(v, dict):
-                if is_mongo:
-                    clean_row[k] = v
-                else:
-                    clean_row[k] = json.dumps(v, ensure_ascii=False, default=str)
-            else:
-                clean_row[k] = v
+        if is_mongo:
+            for k, v in r.items():
+                clean_row[k] = _sanitize_value_for_mongo(v)
 
-        # For MongoDB targets: promote 'id' to '_id' so documents only have one _id primary key
-        if is_mongo and "id" in clean_row and "_id" not in clean_row:
-            clean_row["_id"] = clean_row.pop("id")
+            # Promote primary key 'id' to '_id'
+            if "id" in clean_row and "_id" not in clean_row:
+                clean_row["_id"] = clean_row.pop("id")
+
+            # Generic residual container unpacking (e.g. 'extra_attributes', '_extra_attributes', 'residual_fields', 'unmapped_attributes')
+            for residual_key in ("extra_attributes", "_extra_attributes", "residual_fields", "unmapped_attributes"):
+                if residual_key in clean_row and isinstance(clean_row[residual_key], dict):
+                    container = clean_row.pop(residual_key)
+                    # Handle possible double-nesting
+                    if residual_key in container and isinstance(container[residual_key], dict):
+                        inner = container.pop(residual_key)
+                        container.update(inner)
+                    for sub_k, sub_v in container.items():
+                        # Promote to root if not already present or currently None
+                        if sub_k not in clean_row or clean_row[sub_k] is None:
+                            clean_row[sub_k] = sub_v
+        else:
+            for k, v in r.items():
+                if v is None:
+                    clean_row[k] = None
+                elif isinstance(v, str):
+                    v_str = v.strip()
+                    v_upper = v_str.upper()
+                    if v_upper in SQL_NOW_LITERALS:
+                        clean_row[k] = datetime.now(timezone.utc).isoformat()
+                    elif v_str in ("0000-00-00 00:00:00", "0000-00-00"):
+                        clean_row[k] = None
+                    else:
+                        clean_row[k] = v
+                elif isinstance(v, uuid.UUID):
+                    clean_row[k] = str(v)
+                elif isinstance(v, datetime):
+                    clean_row[k] = v.isoformat()
+                elif isinstance(v, Decimal):
+                    clean_row[k] = str(v)
+                elif isinstance(v, bytes):
+                    clean_row[k] = v.hex()
+                elif isinstance(v, (set, frozenset)):
+                    lst = sorted(str(e) for e in v)
+                    if is_postgres:
+                        clean_row[k] = _pg_array_literal(lst)
+                    else:
+                        clean_row[k] = json.dumps(lst, ensure_ascii=False, default=str)
+                elif isinstance(v, list):
+                    if is_postgres:
+                        clean_row[k] = _pg_array_literal(v)
+                    else:
+                        clean_row[k] = json.dumps(v, ensure_ascii=False, default=str)
+                elif isinstance(v, dict):
+                    clean_row[k] = json.dumps(v, ensure_ascii=False, default=str)
+                else:
+                    clean_row[k] = v
 
         sanitized.append(clean_row)
     return sanitized
