@@ -1,6 +1,6 @@
-# AI Data Migration Platform — Complete REST API Reference (`API_DOCUMENTATION.md`)
+# Migraflow — Complete REST API Reference (`API_DOCUMENTATION.md`)
 
-This document provides a comprehensive, production-grade reference for **100% of all REST & WebSocket API endpoints** provided by the **AI Data Migration Platform Control Plane Backend**.
+This document provides a comprehensive, production-grade reference for **100% of all REST & WebSocket API endpoints** provided by the **Migraflow Control Plane Backend**.
 
 ---
 

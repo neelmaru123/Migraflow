@@ -355,10 +355,11 @@ class ExecutionOrchestrator:
                 logger.info(f"[DRY RUN] Preserving checkpoints (no-op) for dry run job '{job_id}'.")
                 final_status = "dry_run_completed"
 
+            final_total_rows = max(total_estimated_rows, total_successful, total_processed)
             _report_progress(
                 backend_url, agent_token, job_id, final_status, 100.0,
                 total_processed, total_successful, total_failed, total_skipped,
-                total_rows=total_estimated_rows, current_stage=final_status
+                total_rows=final_total_rows, current_stage=final_status
             )
             logger.info(f"=== MIGRATION JOB '{job_id}' ({final_status.upper()})! (Processed: {total_processed}, Would Write: {total_successful}, Failed: {total_failed}, Skipped: {total_skipped}) ===")
 

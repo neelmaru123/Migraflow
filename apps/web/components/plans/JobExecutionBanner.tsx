@@ -41,6 +41,18 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
     onJobUpdatedRef.current = onJobUpdated;
   });
 
+  // Synchronize internal job state whenever initialJob prop updates from parent component
+  const prevJobIdRef = useRef(initialJob?.id);
+  useEffect(() => {
+    if (initialJob) {
+      setJob(initialJob);
+      if (prevJobIdRef.current !== initialJob.id) {
+        prevJobIdRef.current = initialJob.id;
+        setLogs([`[${new Date().toLocaleTimeString()}] Switch view to execution run: ${initialJob.id}`]);
+      }
+    }
+  }, [initialJob?.id, initialJob?.status, initialJob?.updated_at, initialJob?.successful_rows, initialJob?.processed_rows]);
+
   const status = (job.status || 'queued').toLowerCase();
   const isDryRunCompleted = status === 'dry_run_completed';
   const isCancelled = status === 'cancelled';
@@ -592,7 +604,7 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
 
         <div className="p-3.5 rounded-none bg-zinc-950 border border-zinc-800 space-y-1">
           <span className="text-[10px] font-bold text-zinc-500 uppercase block">TOTAL TARGET ROWS</span>
-          <span className="text-lg sm:text-xl font-extrabold text-white">{(totalRows || succRows).toLocaleString()}</span>
+          <span className="text-lg sm:text-xl font-extrabold text-white">{Math.max(totalRows, succRows).toLocaleString()}</span>
           <span className="text-[10px] text-zinc-400 block font-mono">Expected total</span>
         </div>
 

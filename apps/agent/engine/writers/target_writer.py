@@ -132,6 +132,10 @@ def _sanitize_rows_for_target(rows: list, engine_type: str) -> list:
             if "id" in clean_row and "_id" not in clean_row:
                 clean_row["_id"] = clean_row.pop("id")
 
+            # Remove null or empty _id so MongoDB generates unique BSON ObjectIds for un-keyed documents
+            if "_id" in clean_row and (clean_row["_id"] is None or clean_row["_id"] == ""):
+                del clean_row["_id"]
+
             # Generic residual container unpacking (e.g. 'extra_attributes', '_extra_attributes', 'residual_fields', 'unmapped_attributes')
             for residual_key in ("extra_attributes", "_extra_attributes", "residual_fields", "unmapped_attributes"):
                 if residual_key in clean_row and isinstance(clean_row[residual_key], dict):

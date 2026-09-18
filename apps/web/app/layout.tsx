@@ -9,8 +9,8 @@ const inter = Inter({
 });
 
 export const metadata = {
-  title: 'Data Migration Platform',
-  description: 'High-performance schema translation & zero-OOM data migration engine',
+  title: 'Migraflow — AI Data Migration Platform',
+  description: 'Migraflow - High-performance schema translation & zero-OOM data migration engine',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

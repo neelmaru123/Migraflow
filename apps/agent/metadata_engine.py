@@ -18,12 +18,16 @@ class AgentMetadataEngine:
 
     @staticmethod
     def _clean_url_for_sync_engine(url_val: str) -> str:
-        """Converts async drivers (e.g. postgresql+asyncpg) to sync drivers for lightweight agent introspection."""
-        cleaned = url_val.strip()
+        """Converts async drivers (e.g. postgresql+asyncpg) to sync drivers and unquotes encoded database names."""
+        cleaned = urllib.parse.unquote(url_val.strip())
         if cleaned.startswith("postgresql+asyncpg://"):
             cleaned = "postgresql+psycopg2://" + cleaned[len("postgresql+asyncpg://") :]
+        elif cleaned.startswith("postgresql://"):
+            cleaned = "postgresql+psycopg2://" + cleaned[len("postgresql://") :]
         elif cleaned.startswith("mysql+aiomysql://"):
             cleaned = "mysql+pymysql://" + cleaned[len("mysql+aiomysql://") :]
+        elif cleaned.startswith("mysql://"):
+            cleaned = "mysql+pymysql://" + cleaned[len("mysql://") :]
         return cleaned
 
     @classmethod
@@ -38,7 +42,7 @@ class AgentMetadataEngine:
 
         sync_url = cls._clean_url_for_sync_engine(url_val)
         parsed = urllib.parse.urlparse(sync_url)
-        db_name = parsed.path.lstrip("/") if parsed.path else "database"
+        db_name = urllib.parse.unquote(parsed.path.lstrip("/")) if parsed.path else "database"
         scheme = parsed.scheme.lower() if parsed.scheme else "postgresql"
 
         # Check for MongoDB scheme

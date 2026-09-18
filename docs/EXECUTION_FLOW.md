@@ -1,4 +1,4 @@
-# Execution Flow — Schema Catalog Profiling, AI Migration Blueprinting & ETL Execution
+# Execution Flow — Migraflow Platform
 
 ## 1. Entry Point
 
@@ -1050,6 +1050,7 @@
 # Execution Flow - Universal Object Unpacking & BSON Deserialization for MongoDB Target
 
 ## 1. Entry Point
+
 - **File**: [`apps/agent/engine/writers/target_writer.py:L14`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py#L14)
 - **Trigger**: `TargetWriterFactory.bulk_load()` invoked during ETL data streaming when `engine_type in ("mongodb", "mongo")`.
 
@@ -1094,4 +1095,3 @@ sequenceDiagram
 - **[MODIFIED]**: [`apps/agent/engine/writers/target_writer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py) — Added recursive `_sanitize_value_for_mongo()`, residual container promotion, and primary key promotion for MongoDB targets.
 - **[MODIFIED]**: [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py) — Added residual dictionary flattening in `_serialize_residual()` to prevent multi-hop double wrapping.
 - **[NEW]**: [`apps/agent/tests/test_mongo_object_unpacking.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/tests/test_mongo_object_unpacking.py) — Unit test suite verifying PostgreSQL & MySQL JSON unpacking, BSON conversions, and SQL target safety.
-
