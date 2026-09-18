@@ -129,9 +129,12 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
   const [isApproving, setIsApproving] = useState<boolean>(false);
   const [isDryRunning, setIsDryRunning] = useState<boolean>(false);
 
-  // Refinement Prompt State
+  // Refinement Prompt & Tracking State
   const [refinementPrompt, setRefinementPrompt] = useState<string>('');
   const [isRefining, setIsRefining] = useState<boolean>(initialPlan.status === 'refining');
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const activeTaskIdRef = useRef<string | null>(null);
+  const refinementStartTimeRef = useRef<number>(initialPlan.status === 'refining' ? Date.now() : 0);
   const [refiningPromptEcho, setRefiningPromptEcho] = useState<string>('');
   const [refiningElapsedSec, setRefiningElapsedSec] = useState<number>(0);
   const [showJsonModal, setShowJsonModal] = useState<boolean>(false);
@@ -139,11 +142,29 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
     initialPlan.plan_data?.table_mappings?.[0]?.target_table_name || null
   );
 
+  // Keep ref to callbacks to prevent interval thrashing on parent re-renders
+  const onPlanUpdatedRef = useRef(onPlanUpdated);
   useEffect(() => {
+    onPlanUpdatedRef.current = onPlanUpdated;
+  }, [onPlanUpdated]);
+
+  const fetchVersionsRef = useRef(fetchVersions);
+  useEffect(() => {
+    fetchVersionsRef.current = fetchVersions;
+  }, [fetchVersions]);
+
+  useEffect(() => {
+    setPlan(initialPlan);
+    if (!isEditing) {
+      setEditableAst(initialPlan.plan_data);
+    }
     if (initialPlan.status === 'refining') {
       setIsRefining(true);
+      if (refinementStartTimeRef.current === 0) {
+        refinementStartTimeRef.current = Date.now();
+      }
     }
-  }, [initialPlan.status]);
+  }, [initialPlan, isEditing]);
 
   const isHistoricalPreview = previewVersionDetail !== null;
   const ast = isHistoricalPreview
@@ -274,7 +295,8 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
 
     const checkStatus = async () => {
       try {
-        const res = await planService.getRefinementStatus(plan.id);
+        const currentTaskId = activeTaskIdRef.current;
+        const res = await planService.getRefinementStatus(plan.id, currentTaskId || undefined);
         if (!isMounted) return;
 
         if (res.status === 'processing') {
@@ -283,7 +305,16 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
             setRefiningElapsedSec(Math.round(res.elapsed_seconds));
           }
         } else if (res.status === 'completed') {
+          // Guard against stale completed tasks from prior runs
+          if (currentTaskId && res.task_id && res.task_id !== currentTaskId) {
+            return;
+          }
+
           setIsRefining(false);
+          setActiveTaskId(null);
+          activeTaskIdRef.current = null;
+          refinementStartTimeRef.current = 0;
+
           if (res.plan) {
             setPlan(res.plan);
             setEditableAst(res.plan.plan_data);
@@ -307,11 +338,20 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
               toast.error('LLM refinement generated schema feasibility errors! Review diagnostic alert in Overview.');
               scrollToDiagnostics();
             }
-            await fetchVersions();
-            if (onPlanUpdated) onPlanUpdated(res.plan);
+            if (fetchVersionsRef.current) await fetchVersionsRef.current();
+            if (onPlanUpdatedRef.current) onPlanUpdatedRef.current(res.plan);
           }
         } else if (res.status === 'failed') {
+          // Guard against stale failed tasks
+          if (currentTaskId && res.task_id && res.task_id !== currentTaskId) {
+            return;
+          }
+
           setIsRefining(false);
+          setActiveTaskId(null);
+          activeTaskIdRef.current = null;
+          refinementStartTimeRef.current = 0;
+
           const errorMsg = res.error || 'Refinement failed.';
           toast.error(`Refinement Error: ${errorMsg}`);
           try {
@@ -319,19 +359,29 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
             if (isMounted) {
               setPlan(freshPlan);
               setEditableAst(freshPlan.plan_data);
-              if (onPlanUpdated) onPlanUpdated(freshPlan);
+              if (onPlanUpdatedRef.current) onPlanUpdatedRef.current(freshPlan);
             }
           } catch {
             // ignore
           }
         } else {
+          // Status is 'idle' or un-tracked
+          // Anti-race guard: If refinement started less than 10 seconds ago, do not cancel isRefining (request in-flight)
+          const elapsedSinceStart = Date.now() - refinementStartTimeRef.current;
+          if (elapsedSinceStart < 10000) {
+            return; // keep waiting for task registration
+          }
+
           const freshPlan = await planService.getPlan(plan.id);
           if (isMounted && freshPlan.status !== 'refining') {
             setIsRefining(false);
+            setActiveTaskId(null);
+            activeTaskIdRef.current = null;
+            refinementStartTimeRef.current = 0;
             setPlan(freshPlan);
             setEditableAst(freshPlan.plan_data);
-            await fetchVersions();
-            if (onPlanUpdated) onPlanUpdated(freshPlan);
+            if (fetchVersionsRef.current) await fetchVersionsRef.current();
+            if (onPlanUpdatedRef.current) onPlanUpdatedRef.current(freshPlan);
           }
         }
       } catch {
@@ -350,7 +400,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
       clearInterval(intervalId);
       clearInterval(tickerId);
     };
-  }, [isRefining, plan.id, fetchVersions, onPlanUpdated]);
+  }, [isRefining, plan.id]);
 
   // Handle Natural Language AI Plan Refinement
   const handleRefinePlan = async (e: React.FormEvent) => {
@@ -358,20 +408,31 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
     const promptText = refinementPrompt.trim();
     if (!promptText || isRefining) return;
 
+    // 1. Immediately activate UI progress state and save start timestamp
     setIsRefining(true);
+    refinementStartTimeRef.current = Date.now();
     setRefiningPromptEcho(promptText);
     setRefiningElapsedSec(0);
     setRefinementPrompt('');
+    setPlan((prev) => ({ ...prev, status: 'refining' }));
 
     try {
-      await planService.startRefinement(plan.id, promptText);
-      setPlan((prev) => ({ ...prev, status: 'refining' }));
+      // 2. Dispatch async refinement request and capture unique task_id
+      const jobRes = await planService.startRefinement(plan.id, promptText);
+      const taskId = jobRes.task_id;
+      setActiveTaskId(taskId);
+      activeTaskIdRef.current = taskId;
+
       toast.success('AI plan refinement running in background. Polling for results...', {
         icon: '🚀',
         duration: 4000,
       });
     } catch (err: any) {
       setIsRefining(false);
+      setActiveTaskId(null);
+      activeTaskIdRef.current = null;
+      refinementStartTimeRef.current = 0;
+      setPlan((prev) => ({ ...prev, status: prev.plan_data ? 'edited' : 'draft' }));
       const msg = err.response?.data?.detail || err.message || 'Failed to start refinement.';
       toast.error(`Refinement Error: ${msg}`);
     }

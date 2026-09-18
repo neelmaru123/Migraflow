@@ -4,7 +4,7 @@ Migration Plans Domain — FastAPI REST API Routes
 
 import uuid
 from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -301,6 +301,7 @@ async def refine_migration_plan_async(
 @router.get("/{plan_id}/refine/status", response_model=PlanRefinementStatusResponse)
 async def get_refinement_status(
     plan_id: uuid.UUID,
+    task_id: Optional[str] = Query(None, description="Specific refinement task ID"),
     current_user: User = Depends(get_current_active_user),
     session: AsyncSession = Depends(get_db),
 ):
@@ -316,7 +317,7 @@ async def get_refinement_status(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to inspect this migration plan.",
         )
-    return await MigrationPlanService.get_refinement_status(session, plan)
+    return await MigrationPlanService.get_refinement_status(session, plan, task_id=task_id)
 
 
 @router.post("/{plan_id}/validate", response_model=PlanValidationResultResponse)

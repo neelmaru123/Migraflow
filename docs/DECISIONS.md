@@ -1952,3 +1952,37 @@ Rebranded all human-facing titles, package definitions, UI layout metadata, docu
 - **Package Manifests**: Updated `pyproject.toml` (`migraflow-api`, `migraflow-agent`) and `package.json` (`migraflow-web`).
 - **Frontend UI**: Updated root HTML title (`Migraflow — AI Data Migration Platform`) and auth pages.
 - **Documentation**: Updated `README.md`, `ARCHITECTURE.md`, `API_DOCUMENTATION.md`, `LANGGRAPH_ARCHITECTURE.md`, and `CONTRIBUTING.md`.
+
+---
+
+## [2026-09-18] - Task-ID Correlated AI Plan Refinement Polling & Anti-Race Condition Guard
+
+### 1. Decision Summary
+
+Engineered a race-condition-free, task-correlated polling architecture for background AI plan refinement between `PlanBlueprintViewer.tsx` (frontend) and `RefinementTaskManager` (backend API):
+
+1. **Task ID Correlation (`task_id`)**: Both frontend and backend API explicitly tag and verify `task_id` during asynchronous refinement lifecycle. The status endpoint `GET /plans/{plan_id}/refine/status?task_id={task_id}` queries and validates specific task executions, preventing cross-run state collisions.
+2. **Stale Completion Collision Elimination**: `PlanBlueprintViewer` ignores any `completed` or `failed` status responses whose `task_id` does not match the active in-flight `task_id`, preventing immediate polling teardown caused by cached results of previous refinement runs.
+3. **Anti-Race In-Flight Guard**: Frontend polling enforces a minimum in-flight grace period (10 seconds) during which any temporary `idle` responses (caused by network transit latency between initial trigger and server database commit) are ignored, maintaining the live progress banner without interruption.
+4. **Callback & Prop Synchronization**: Parent callback references are wrapped in `useRef` and `useCallback` to prevent continuous interval teardown and timer resetting during parent page re-renders, while syncing component state with external `initialPlan` changes.
+5. **Real-time Event Broadcast**: Emits `PLAN_REFINED` / `PLAN_REFINEMENT_FAILED` WebSocket events upon background coroutine resolution.
+
+### 2. Why This Approach? (Rationale)
+
+- **Problem Being Solved**: Users observed that requesting an AI blueprint refinement caused the LLM task to run in LangSmith, but the UI progress bar would intermittently disappear or fail to update, requiring a hard browser refresh to see the refined blueprint.
+- **Root Cause**:
+  1. For re-refinements, `RefinementTaskManager` held the previous run's `status: "completed"` task. Immediate polling received this stale completed status before the new POST request finished on the server, causing the frontend to immediately cancel polling and hide the progress banner.
+  2. For initial refinements, immediate polling before server DB commit saw `status: "idle"` and prematurely canceled polling.
+- **Chosen Solution**: Correlating polls to specific `task_id` tokens and ignoring non-matching or premature `idle` responses ensures seamless, continuous UI progress and automatic blueprint updating upon completion.
+
+### 3. Alternatives Considered & Rejected
+
+- **Alternative A: Blocking Synchronous Refinement (`POST /plans/{plan_id}/refine`)**:
+  - _Rejected_: LLM refinement with comprehensive multi-source schema evaluation can take 20–60 seconds, which risks HTTP gateway timeouts and locks the browser UI.
+- **Alternative B: Blanket In-Memory Wipe of Task State on Endpoint Entry**:
+  - _Rejected_: Prone to race conditions if multiple browser tabs or clients inspect the plan simultaneously. Indexing by `task_id` provides thread-safe isolation.
+
+### 4. Trade-offs & Future Considerations
+
+- In-memory `RefinementTaskManager` tracks active and recent tasks with minimal memory overhead while persisting final versions directly to PostgreSQL.
+

@@ -489,6 +489,8 @@ class ExecutionService:
             job.current_stage = update.current_stage
         if update.error_message:
             job.error_message = update.error_message
+        elif update.status in ["completed", "dry_run_completed"]:
+            job.error_message = None
 
         # Refresh agent last_seen_at, status, and idle_since to prevent heartbeat starvation during ETL execution
         if job.agent_id:

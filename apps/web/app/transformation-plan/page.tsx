@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, Suspense } from 'react';
+import React, { useState, useEffect, useCallback, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { PlanDetailResponse } from '../../types/migrationPlan';
 import planService from '../../services/planService';
@@ -13,6 +13,10 @@ function TransformationPlanContent() {
   const [plan, setPlan] = useState<PlanDetailResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const handlePlanUpdated = useCallback((updated: PlanDetailResponse) => {
+    setPlan(updated);
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -137,7 +141,7 @@ function TransformationPlanContent() {
         ) : (
           <PlanBlueprintViewer
             plan={plan}
-            onPlanUpdated={(updated) => setPlan(updated)}
+            onPlanUpdated={handlePlanUpdated}
           />
         )}
       </main>

@@ -295,6 +295,14 @@ class ExecutionOrchestrator:
                             offset += len(df_raw)
                             CheckpointManager.save_checkpoint(job_id, target_table, offset, total_processed, source_identifier=src_ident, source_table=src_table)
 
+                            # Report live ETL streaming progress to backend
+                            pct = min(99.0, round((total_processed / total_estimated_rows * 100.0), 1)) if total_estimated_rows > 0 else 50.0
+                            _report_progress(
+                                backend_url, agent_token, job_id, "running", pct,
+                                total_processed, total_successful, total_failed, total_skipped,
+                                total_rows=total_estimated_rows, current_stage="data_streaming", current_table=target_table
+                            )
+
                     # For multi-source merges, stream deduplicated results from DuckDB staging area in bounded batches
                     if len(source_tables) > 1 and staging_conn:
                         for chunk_df in TableMerger.stream_deduplicated_chunks(staging_conn, staging_table_name, conflict_res, chunk_size=50000):
@@ -308,6 +316,14 @@ class ExecutionOrchestrator:
                                 succ = len(chunk_df)
                                 total_processed += succ
                                 total_successful += succ
+
+                            # Report live ETL streaming progress to backend
+                            pct = min(99.0, round((total_processed / total_estimated_rows * 100.0), 1)) if total_estimated_rows > 0 else 50.0
+                            _report_progress(
+                                backend_url, agent_token, job_id, "running", pct,
+                                total_processed, total_successful, total_failed, total_skipped,
+                                total_rows=total_estimated_rows, current_stage="data_streaming", current_table=target_table
+                            )
 
                 finally:
                     if staging_conn:

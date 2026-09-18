@@ -484,20 +484,22 @@
 
 ## 1. Entry Point
 
-- **File**: [`apps/api/app/modules/migration_plans/migration_plans_routes.py:L205`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py#L205)
+- **File**: [`apps/api/app/modules/migration_plans/migration_plans_routes.py:L268`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py#L268)
 - **Trigger**: User inputs a natural language prompt (e.g., _"Convert status int enum to string varchar"_) in [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) and submits the form.
 
 ## 2. Step-by-Step Execution Sequence
 
-1. **Frontend Dispatch**:
-   - `handleRefinePlan()` in [`PlanBlueprintViewer.tsx:L270`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx#L270) invokes `planService.startRefinement(plan.id, promptText)`.
-   - UI immediately sets `isRefining = true`, records prompt echo, initializes elapsed timer at 0s, and displays the cyber-dark Refinement Progress Banner.
+1. **Frontend Dispatch & Race-Condition Guard**:
+   - `handleRefinePlan()` in [`PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) sets `isRefining = true`, records `refinementStartTimeRef = Date.now()`, displays prompt echo, initializes elapsed timer at 0s, and mounts the cyber-dark Refinement Progress Banner.
+   - Submits `planService.startRefinement(plan.id, promptText)` (`POST /api/v1/plans/{plan_id}/refine-async`).
+   - Captures returned `task_id` into `activeTaskIdRef` and `activeTaskId` state.
 2. **API Ingestion & Immediate 202 Accepted**:
-   - `POST /api/v1/plans/{plan_id}/refine-async` executes `refine_migration_plan_async()` in [`migration_plans_routes.py:L205`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py#L205).
+   - `POST /api/v1/plans/{plan_id}/refine-async` executes `refine_migration_plan_async()` in [`migration_plans_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py).
    - Validates ownership, ensures plan is not locked by an active migration job, and verifies plan is not already in `status == 'refining'` (rejects duplicates with `409 Conflict`).
-   - Registers entry in `RefinementTaskManager`, transitions `plan.status = 'refining'`, commits, launches detached coroutine `asyncio.create_task(_run_plan_refinement_background())`, and returns `202 Accepted` with `task_id` in ~200ms.
+   - Atomically registers new entry in `RefinementTaskManager` indexed by both `plan_id` and `task_id`.
+   - Transitions `plan.status = 'refining'`, commits transaction, launches detached coroutine `asyncio.create_task(_run_plan_refinement_background(plan.id, user_feedback, task_id))`, and returns `202 Accepted` with `task_id` in ~200ms.
 3. **Detached Background Coroutine Execution**:
-   - `_run_plan_refinement_background()` opens a fresh `AsyncSessionLocal()` in [`migration_plans_services.py:L130`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py#L130).
+   - `_run_plan_refinement_background()` opens a fresh `AsyncSessionLocal()` in [`migration_plans_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py).
    - Calls `MigrationPlanService.execute_refinement_core()`:
      - Eagerly loads agent and data source metadata snapshots.
      - Formats serialization context string.
@@ -506,18 +508,24 @@
      - Generates and persists new `MigrationPlanVersion` record (e.g., v2 `llm_refinement`).
      - Updates `plan.plan_data`, `plan.is_valid`, and sets `plan.status = 'edited'` (or `'invalid_edits'`).
      - Commits changes to PostgreSQL.
-   - `RefinementTaskManager.complete_task()` stores completed plan DTO in memory.
-4. **Client Polling & Browser Refresh Resilience**:
-   - Every 2.0 seconds, `PlanBlueprintViewer.tsx` polls `GET /api/v1/plans/{plan_id}/refine/status`.
-   - If the user reloads the page (F5), `plan.status === 'refining'` is detected on mount, re-arming the polling loop and restoring the banner with the elapsed timer.
+   - `RefinementTaskManager.complete_task(plan_id, plan_dto, task_id)` stores completed plan DTO in memory.
+   - Broadcasts real-time `PLAN_REFINED` WebSocket notification via `manager.broadcast_to_agent()`.
+4. **Client Polling & Task-ID Verification**:
+   - Every 2.0 seconds, `PlanBlueprintViewer.tsx` polls `GET /api/v1/plans/{plan_id}/refine/status?task_id={task_id}`.
+   - If `res.status === 'completed'` or `'failed'`, the client checks that `res.task_id === activeTaskIdRef.current`, preventing premature teardown from cached results of older refinement tasks.
+   - If `res.status === 'idle'` and less than 10 seconds have elapsed since dispatch, the client ignores the transient idle response to account for in-flight transit and server commit latency.
+   - If the user reloads the page (F5), `plan.status === 'refining'` is detected on mount, restoring the poller and live banner.
 5. **Hot-Reload on Completion**:
-   - Poller receives `status: 'completed'` with the updated `PlanDetailResponse`.
-   - Disables `isRefining`, updates React state (`plan`, `editableAst`), displays success toast (or feasibility alert), re-fetches version history, and smoothly scrolls to `RefinementFeedbackCard`.
+   - Poller receives matching `status: 'completed'` with the updated `PlanDetailResponse`.
+   - Disables `isRefining`, resets active task refs, updates React state (`plan`, `editableAst`), displays success toast (or feasibility alert), re-fetches version history, and smoothly scrolls to `RefinementFeedbackCard`.
 
 ## 3. Impact & Delta Analysis (AI Modifications)
 
-- **[NEW]**: [`apps/api/tests/unit/test_plan_refine_async.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_plan_refine_async.py)
-  - Full end-to-end integration test of async 202 launch, polling status, background execution, and version creation.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py) - Added dual-index task tracking (`_tasks_by_plan` and `_tasks_by_id`) and WebSocket event broadcast.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py) - Added `task_id` query parameter to `GET /refine/status`.
+- **[MODIFIED]**: [`apps/web/services/planService.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/services/planService.ts) - Added `taskId` parameter to `getRefinementStatus`.
+- **[MODIFIED]**: [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) - Added `activeTaskIdRef`, anti-race grace window, and prop synchronization.
+- **[MODIFIED]**: [`apps/web/app/transformation-plan/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/transformation-plan/page.tsx) - Memoized `handlePlanUpdated` callback with `useCallback`.
 - **[MODIFIED]**: [`apps/api/app/core/config.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/core/config.py)
   - Raised `LLM_TIMEOUT_SECONDS` from `180.0` to `360.0`.
 - **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_schemas.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_schemas.py)
