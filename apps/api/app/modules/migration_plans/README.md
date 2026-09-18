@@ -153,20 +153,44 @@ The `migration_plans` module is the core control-plane component responsible for
 
 ---
 
-### 8. `approve_plan(session, plan)`
+### 9. `start_async_generation(session, agent, target_config)`
 - **Input Parameters:**
   - `session` (`AsyncSession`): Active database session.
-  - `plan` (`MigrationPlan`): Plan entity to approve.
-- **Return Value:** `MigrationPlan` - Approved plan with status `"completed"`.
+  - `agent` (`Agent`): Target agent entity.
+  - `target_config` (`TargetDatabaseConfig`): Target database configuration DTO.
+- **Return Value:** `Tuple[str, uuid.UUID]` - Pair of (`task_id`, `plan_id`).
 - **Business Logic:**
-  1. Runs validator against `plan.plan_data`. If plan is invalid, raises `HTTP 422 Unprocessable Entity`.
-  2. Updates `plan.status = "completed"`.
-  3. Commits session.
-  4. Broadcasts WebSocket event `PLAN_GENERATED` to agent daemon via `manager.broadcast_to_agent()`.
-  5. Returns approved plan.
-- **Affected Tables:** `migration_plans` (UPDATE)
-- **Exceptions:**
-  - `HTTPException(422 Unprocessable Entity)`: If plan fails validation checks.
+  1. Creates draft `MigrationPlan` entity with `status = "generating"`.
+  2. Registers task in `GenerationTaskManager` (`status: processing`).
+  3. Launches detached background coroutine `asyncio.create_task(_run_plan_generation_background())`.
+  4. Returns `task_id` and `plan_id` in ~150ms.
+
+---
+
+### 10. `get_generation_status(session, agent_id)`
+- **Input Parameters:** `session` (`AsyncSession`), `agent_id` (`uuid.UUID`).
+- **Return Value:** `PlanGenerationStatusResponse` with active status, elapsed seconds, and populated `PlanDetailResponse` upon completion.
+
+---
+
+### 11. `start_async_refinement(session, plan, user_feedback)`
+- **Input Parameters:**
+  - `session` (`AsyncSession`): Active database session.
+  - `plan` (`MigrationPlan`): Target plan entity.
+  - `user_feedback` (`str`): Natural language instruction.
+- **Return Value:** `str` - Unique `task_id`.
+- **Business Logic:**
+  1. Checks active execution locks.
+  2. Registers task in `RefinementTaskManager` indexed by both `plan_id` and `task_id`.
+  3. Updates `plan.status = "refining"`, commits transaction.
+  4. Launches background coroutine `asyncio.create_task(_run_plan_refinement_background(plan.id, user_feedback, task_id))`.
+  5. Returns `task_id` in ~150ms.
+
+---
+
+### 12. `get_refinement_status(session, plan, task_id)`
+- **Input Parameters:** `session` (`AsyncSession`), `plan` (`MigrationPlan`), `task_id` (`Optional[str]`).
+- **Return Value:** `PlanRefinementStatusResponse` containing `status`, `elapsed_seconds`, `user_prompt`, and updated `PlanDetailResponse`. Validates `task_id` to prevent cross-run cache collisions.
 
 ---
 
@@ -174,18 +198,27 @@ The `migration_plans` module is the core control-plane component responsible for
 
 | HTTP Method | Route Path | Description | Service Function Called | Auth Required |
 | :--- | :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/plans` | Create and generate plan for an agent | `MigrationPlanService.create_plan_for_agent` | User JWT |
+| `POST` | `/api/v1/plans/generate` | Synchronous plan generation (legacy) | `MigrationPlanService.create_plan_for_agent` | User JWT |
+| `POST` | `/api/v1/plans/generate-async` | Asynchronous background plan generation (202) | `MigrationPlanService.start_async_generation` | User JWT |
+| `GET` | `/api/v1/plans/agent/{agent_id}/generation-status` | Poll agent plan generation progress | `MigrationPlanService.get_generation_status` | User JWT |
 | `GET` | `/api/v1/plans` | List user's migration plans | `MigrationPlanService.list_plans_for_user` | User JWT |
-| `GET` | `/api/v1/plans/{plan_id}` | Get specific plan details | `MigrationPlanService.get_plan_by_id` | User JWT |
-| `PUT` | `/api/v1/plans/{plan_id}` | Update plan AST manually | `MigrationPlanService.update_plan_data` | User JWT |
-| `POST` | `/api/v1/plans/{plan_id}/refine` | Refine plan using natural language prompt | `MigrationPlanService.refine_plan` | User JWT |
+| `GET` | `/api/v1/plans/{plan_id}` | Get specific plan details (full AST) | `MigrationPlanService.get_plan_by_id` | User JWT / Agent Token |
+| `PUT` | `/api/v1/plans/{plan_id}` | Update plan AST manually & validate | `MigrationPlanService.update_plan_data` | User JWT |
+| `POST` | `/api/v1/plans/{plan_id}/refine` | Synchronous plan refinement (legacy) | `MigrationPlanService.refine_plan` | User JWT |
+| `POST` | `/api/v1/plans/{plan_id}/refine-async` | Asynchronous background plan refinement (202) | `MigrationPlanService.start_async_refinement` | User JWT |
+| `GET` | `/api/v1/plans/{plan_id}/refine/status` | Poll plan refinement status & progress | `MigrationPlanService.get_refinement_status` | User JWT |
 | `POST` | `/api/v1/plans/{plan_id}/validate` | Run instant feasibility validation | `MigrationPlanService.validate_plan_by_id` | User JWT |
 | `POST` | `/api/v1/plans/{plan_id}/approve` | Approve plan for execution | `MigrationPlanService.approve_plan` | User JWT |
+| `GET` | `/api/v1/plans/{plan_id}/versions` | List historical plan version snapshots | `MigrationPlanService.list_plan_versions` | User JWT |
+| `GET` | `/api/v1/plans/{plan_id}/versions/{version_number}` | Get full AST details of specific version | `MigrationPlanService.get_plan_version` | User JWT |
+| `POST` | `/api/v1/plans/{plan_id}/versions/{version_number}/restore` | Restore plan AST to historical version | `MigrationPlanService.restore_plan_version` | User JWT |
 
 ---
 
 ## 6. Internal Engines & Sub-Components
 
+- **`RefinementTaskManager`**: Thread-safe in-memory task tracker supporting dual-indexing (`_tasks_by_plan` and `_tasks_by_id`) for race-condition-free background refinement polling.
+- **`GenerationTaskManager`**: Thread-safe in-memory task tracker managing background initial plan generation.
 - **`migration_plans_graph.py`**: LangGraph 9-node StateGraph workflow (`serialize_context_node`, `generate_plan_ast_node`, `validate_feasibility_node`, `auto_correct_ast_node`, `human_approval_interrupt_node`, `process_user_feedback_node`, `process_manual_edits_node`, `explanation_generator_node`, `finalize_and_persist_node`).
 - **`migration_plans_validator.py`**: Deterministic Schema Validator (`MigrationPlanValidator`) executing multi-stage feasibility checks:
   - **Stage 0**: Empty Table Mapping Guard (`len(table_mappings) > 0`).
@@ -199,10 +232,12 @@ The `migration_plans` module is the core control-plane component responsible for
 
 ### Key Refinement & Concurrency Protections
 1. **Refinement Row-Level Lock**:
-   - `refine_plan()` acquires PostgreSQL `select(...).with_for_update()` row-level lock on `MigrationPlan` before invoking LLM refinement, serializing concurrent refinement requests.
-2. **Refinement Guidance Preservation**:
-   - `refine_plan()` passes user-provided `custom_instructions` from `plan.target_config` into `MetadataContextSerializer.serialize()` to ensure prompt instructions persist during iterative refinement runs.
-3. **Active Execution Lock Check**:
+   - `execute_refinement_core()` acquires PostgreSQL `select(...).with_for_update()` row-level lock on `MigrationPlan` before invoking LLM refinement, serializing concurrent refinement requests.
+2. **Task ID Correlation**:
+   - Every background task generates a unique `task_id` (UUID), ensuring that polling checks correlate with active runs and ignore stale completed results from prior runs.
+3. **Refinement Guidance Preservation**:
+   - Passes user-provided `custom_instructions` from `plan.target_config` into `MetadataContextSerializer.serialize()` to ensure prompt instructions persist during iterative refinement runs.
+4. **Active Execution Lock Check**:
    - `_check_active_execution_lock()` prevents editing or refining a plan while an active execution job (`queued`, `preparing`, `running`) is running on that plan.
 
 ---
