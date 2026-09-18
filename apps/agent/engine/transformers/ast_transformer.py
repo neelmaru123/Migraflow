@@ -451,11 +451,14 @@ class ASTTransformer:
                     any(dt_kw in target_dtype for dt_kw in ("time", "date", "timestamp", "datetime"))
                     or any(k in target_col.lower() for k in ("_at", "created_at", "updated_at", "timestamp", "datetime"))
                 )
-                if _is_sql_datetime_expr(const_val) or (is_dt_target and (_is_sql_datetime_expr(const_val) or const_val is None or str(const_val).strip() == "")):
+                if col_spec.get("is_primary_key") or (target_col == "id" and not const_val):
+                    pk_list = [_deterministic_fallback_uuid(retry_seed_prefix, row_offset + i) for i in range(df.height)]
+                    exprs.append(pl.Series(target_col, pk_list))
+                elif _is_sql_datetime_expr(const_val) or (is_dt_target and (_is_sql_datetime_expr(const_val) or const_val is None or str(const_val).strip() == "")):
                     exprs.append(pl.lit(datetime.now(timezone.utc).isoformat()).alias(target_col))
                 elif const_val is not None and str(const_val) != "":
                     exprs.append(pl.lit(str(const_val)).alias(target_col))
-                elif "uuid" in target_dtype or target_col.endswith("_id") or target_col == "id":
+                elif "uuid" in target_dtype or target_col.endswith("_id"):
                     # NULL FK/UUID columns — let DB default or FK resolution fill them
                     exprs.append(pl.lit(None).cast(pl.Utf8).alias(target_col))
                 elif is_dt_target:

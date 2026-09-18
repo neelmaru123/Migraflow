@@ -633,6 +633,7 @@ class HeartbeatConfig:
     def __init__(self) -> None:
         self._interval = self.ACTIVE_INTERVAL
         self._lock = threading.Lock()
+        self._wake_event = threading.Event()
 
     def enter_idle_mode(self) -> None:
         """Switch to 5-minute standby heartbeat (Option C). Container stays alive."""
@@ -649,6 +650,7 @@ class HeartbeatConfig:
         with self._lock:
             if self._interval != self.ACTIVE_INTERVAL:
                 self._interval = self.ACTIVE_INTERVAL
+                self._wake_event.set()
                 logger.info(
                     "[OPTION C] Heartbeat restored to ACTIVE mode (20-sec interval)."
                 )
@@ -706,7 +708,15 @@ def start_heartbeat_thread(
                 # Backend confirmed an active job — snap back to fast mode
                 heartbeat_config.enter_active_mode()
 
-            stop_event.wait(timeout=heartbeat_config.current)
+            # Sliced wait loop: wake up immediately if mode switches to active or stop_event is set
+            sleep_elapsed = 0
+            while not stop_event.is_set():
+                if stop_event.wait(timeout=1.0):
+                    break
+                sleep_elapsed += 1
+                if sleep_elapsed >= heartbeat_config.current or heartbeat_config._wake_event.is_set():
+                    heartbeat_config._wake_event.clear()
+                    break
 
         logger.info("Background heartbeat loop terminated cleanly.")
 

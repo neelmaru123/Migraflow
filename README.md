@@ -1,4 +1,4 @@
-# AI Data Migration Platform — Project Structure & Architecture Guide
+# Migraflow — AI Data Migration Platform
 
 An enterprise-grade, AI-assisted platform for data migration, data merging, data profiling, cleaning, and transformation.
 

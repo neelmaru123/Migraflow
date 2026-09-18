@@ -4,21 +4,22 @@ Database connection pooling and identifier quoting utilities for agent execution
 
 import logging
 import threading
+import urllib.parse
 from sqlalchemy import create_engine
 
 logger = logging.getLogger("docker-agent-execution")
 
 
 def _clean_url_for_engine(db_url: str) -> str:
-    cleaned = db_url.strip()
+    cleaned = urllib.parse.unquote(db_url.strip())
     if cleaned.startswith("postgresql+asyncpg://"):
-        return "postgresql+psycopg2://" + cleaned[len("postgresql+asyncpg://") :]
-    if cleaned.startswith("postgresql://"):
-        return "postgresql+psycopg2://" + cleaned[len("postgresql://") :]
-    if cleaned.startswith("mysql+aiomysql://"):
-        return "mysql+pymysql://" + cleaned[len("mysql+aiomysql://") :]
-    if cleaned.startswith("mysql://"):
-        return "mysql+pymysql://" + cleaned[len("mysql://") :]
+        cleaned = "postgresql+psycopg2://" + cleaned[len("postgresql+asyncpg://") :]
+    elif cleaned.startswith("postgresql://"):
+        cleaned = "postgresql+psycopg2://" + cleaned[len("postgresql://") :]
+    elif cleaned.startswith("mysql+aiomysql://"):
+        cleaned = "mysql+pymysql://" + cleaned[len("mysql+aiomysql://") :]
+    elif cleaned.startswith("mysql://"):
+        cleaned = "mysql+pymysql://" + cleaned[len("mysql://") :]
     return cleaned
 
 

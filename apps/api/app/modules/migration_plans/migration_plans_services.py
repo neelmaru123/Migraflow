@@ -46,14 +46,15 @@ logger = logging.getLogger(__name__)
 
 class RefinementTaskManager:
     """Thread-safe in-memory task tracker for long-running AI plan refinements."""
-    _tasks: Dict[uuid.UUID, Dict[str, Any]] = {}
+    _tasks_by_plan: Dict[uuid.UUID, Dict[str, Any]] = {}
+    _tasks_by_id: Dict[str, Dict[str, Any]] = {}
     _lock: asyncio.Lock = asyncio.Lock()
 
     @classmethod
     async def start_task(cls, plan_id: uuid.UUID, user_prompt: str) -> str:
         async with cls._lock:
             task_id = str(uuid.uuid4())
-            cls._tasks[plan_id] = {
+            task_data = {
                 "task_id": task_id,
                 "plan_id": plan_id,
                 "status": "processing",
@@ -63,14 +64,26 @@ class RefinementTaskManager:
                 "error": None,
                 "plan": None,
             }
+            cls._tasks_by_plan[plan_id] = task_data
+            cls._tasks_by_id[task_id] = task_data
             return task_id
 
     @classmethod
-    async def get_task(cls, plan_id: uuid.UUID) -> Optional[Dict[str, Any]]:
+    async def get_task(
+        cls, plan_id: uuid.UUID, task_id: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
         async with cls._lock:
-            task = cls._tasks.get(plan_id)
+            task = None
+            if task_id and task_id in cls._tasks_by_id:
+                task = cls._tasks_by_id[task_id]
+            elif plan_id in cls._tasks_by_plan:
+                candidate = cls._tasks_by_plan[plan_id]
+                if task_id is None or candidate.get("task_id") == task_id:
+                    task = candidate
+
             if not task:
                 return None
+
             started = task.get("started_at")
             completed = task.get("completed_at")
             now = completed or datetime.now(timezone.utc)
@@ -80,26 +93,42 @@ class RefinementTaskManager:
             return task_copy
 
     @classmethod
-    async def complete_task(cls, plan_id: uuid.UUID, plan_detail: Any) -> None:
+    async def complete_task(
+        cls, plan_id: uuid.UUID, plan_detail: Any, task_id: Optional[str] = None
+    ) -> None:
         async with cls._lock:
-            if plan_id in cls._tasks:
-                cls._tasks[plan_id]["status"] = "completed"
-                cls._tasks[plan_id]["completed_at"] = datetime.now(timezone.utc)
-                cls._tasks[plan_id]["plan"] = plan_detail
-                cls._tasks[plan_id]["error"] = None
+            task = None
+            if task_id and task_id in cls._tasks_by_id:
+                task = cls._tasks_by_id[task_id]
+            elif plan_id in cls._tasks_by_plan:
+                task = cls._tasks_by_plan[plan_id]
+
+            if task:
+                task["status"] = "completed"
+                task["completed_at"] = datetime.now(timezone.utc)
+                task["plan"] = plan_detail
+                task["error"] = None
 
     @classmethod
-    async def fail_task(cls, plan_id: uuid.UUID, error_message: str) -> None:
+    async def fail_task(
+        cls, plan_id: uuid.UUID, error_message: str, task_id: Optional[str] = None
+    ) -> None:
         async with cls._lock:
-            if plan_id in cls._tasks:
-                cls._tasks[plan_id]["status"] = "failed"
-                cls._tasks[plan_id]["completed_at"] = datetime.now(timezone.utc)
-                cls._tasks[plan_id]["error"] = error_message
+            task = None
+            if task_id and task_id in cls._tasks_by_id:
+                task = cls._tasks_by_id[task_id]
+            elif plan_id in cls._tasks_by_plan:
+                task = cls._tasks_by_plan[plan_id]
+
+            if task:
+                task["status"] = "failed"
+                task["completed_at"] = datetime.now(timezone.utc)
+                task["error"] = error_message
 
     @classmethod
     async def is_running(cls, plan_id: uuid.UUID) -> bool:
         async with cls._lock:
-            task = cls._tasks.get(plan_id)
+            task = cls._tasks_by_plan.get(plan_id)
             return bool(task and task.get("status") == "processing")
 
 
@@ -190,25 +219,43 @@ def to_plan_detail_dto(plan: MigrationPlan) -> PlanDetailResponse:
 
 
 async def _run_plan_refinement_background(
-    plan_id: uuid.UUID, user_feedback: str
+    plan_id: uuid.UUID, user_feedback: str, task_id: str
 ):
     """Background coroutine running AI refinement with a fresh AsyncSession."""
     async with AsyncSessionLocal() as session:
         try:
             plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
             if not plan:
-                await RefinementTaskManager.fail_task(plan_id, f"Plan '{plan_id}' not found.")
+                await RefinementTaskManager.fail_task(plan_id, f"Plan '{plan_id}' not found.", task_id=task_id)
                 return
 
             refined_plan = await MigrationPlanService.execute_refinement_core(
                 session, plan, user_feedback
             )
             plan_dto = to_plan_detail_dto(refined_plan)
-            await RefinementTaskManager.complete_task(plan_id, plan_dto)
-            logger.info(f"Background AI refinement successfully completed for plan '{plan_id}'.")
+            await RefinementTaskManager.complete_task(plan_id, plan_dto, task_id=task_id)
+            logger.info(f"Background AI refinement successfully completed for plan '{plan_id}' (task_id: {task_id}).")
+
+            if plan.agent_id:
+                try:
+                    await manager.broadcast_to_agent(
+                        agent_id=str(plan.agent_id),
+                        message={
+                            "event_type": "PLAN_REFINED",
+                            "data": {
+                                "plan_id": str(plan.id),
+                                "agent_id": str(plan.agent_id),
+                                "task_id": task_id,
+                                "status": "completed",
+                                "plan": plan_dto.model_dump(mode="json"),
+                            },
+                        },
+                    )
+                except Exception as b_err:
+                    logger.debug(f"Optional broadcast skipped: {b_err}")
         except Exception as exc:
-            logger.error(f"Background AI refinement failed for plan '{plan_id}': {exc}", exc_info=True)
-            await RefinementTaskManager.fail_task(plan_id, str(exc))
+            logger.error(f"Background AI refinement failed for plan '{plan_id}' (task_id: {task_id}): {exc}", exc_info=True)
+            await RefinementTaskManager.fail_task(plan_id, str(exc), task_id=task_id)
             try:
                 async with AsyncSessionLocal() as recovery_session:
                     stmt = select(MigrationPlan).where(MigrationPlan.id == plan_id)
@@ -846,17 +893,18 @@ class MigrationPlanService:
         plan.status = "refining"
         await session.commit()
 
-        # Launch detached background coroutine
-        asyncio.create_task(_run_plan_refinement_background(plan.id, user_feedback))
+        # Launch detached background coroutine with task_id
+        asyncio.create_task(_run_plan_refinement_background(plan.id, user_feedback, task_id))
         return task_id
 
     @staticmethod
     async def get_refinement_status(
         session: AsyncSession,
         plan: MigrationPlan,
+        task_id: Optional[str] = None,
     ) -> PlanRefinementStatusResponse:
         """Fetches the current status of a refinement task for the given plan."""
-        task = await RefinementTaskManager.get_task(plan.id)
+        task = await RefinementTaskManager.get_task(plan.id, task_id=task_id)
         if task:
             return PlanRefinementStatusResponse(
                 task_id=task.get("task_id"),
@@ -873,7 +921,7 @@ class MigrationPlanService:
         # Fallback if server restarted or task finished before memory retention
         is_refining = plan.status == "refining"
         return PlanRefinementStatusResponse(
-            task_id=None,
+            task_id=task_id,
             plan_id=plan.id,
             status="processing" if is_refining else "idle",
             user_prompt=None,

@@ -1,5 +1,5 @@
 {
-  "name": "data-migration-platform-web",
+  "name": "migraflow-web",
   "version": "0.1.0",
   "private": true,
   "scripts": {

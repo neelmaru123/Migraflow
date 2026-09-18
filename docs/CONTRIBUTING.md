@@ -1,6 +1,6 @@
-# Contributing Guidelines — AI Data Migration Platform
+# Contributing Guidelines — Migraflow Platform
 
-Welcome to the **AI Data Migration Platform** repository. Please adhere to these guidelines during development.
+Welcome to the **Migraflow** repository. Please adhere to these guidelines during development.
 
 ---
 

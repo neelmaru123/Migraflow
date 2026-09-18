@@ -1,6 +1,6 @@
-# Architecture Specification — AI Data Migration Platform
+# Architecture Specification — Migraflow Platform
 
-Welcome to the **AI Data Migration Platform** architecture guide! This document provides a comprehensive, implementation-accurate overview of the platform's architectural principles, components, module responsibilities, end-to-end execution flows, and communication protocols.
+Welcome to the **Migraflow** architecture guide! This document provides a comprehensive, implementation-accurate overview of the platform's architectural principles, components, module responsibilities, end-to-end execution flows, and communication protocols.
 
 ---
 

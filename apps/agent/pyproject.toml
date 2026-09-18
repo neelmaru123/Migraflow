@@ -1,8 +1,8 @@
 [tool.poetry]
-name = "data-migration-platform-agent"
+name = "migraflow-agent"
 version = "0.1.0"
-description = "Docker Agent Application Runtime for Customer Database Migration"
-authors = ["Lead Architect <architect@migrationplatform.com>"]
+description = "Migraflow Docker Agent Application Runtime for Database Migration"
+authors = ["Migraflow Architect <architect@migraflow.com>"]
 readme = "README.md"
 package-mode = false
 

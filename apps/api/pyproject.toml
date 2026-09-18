@@ -1,8 +1,8 @@
 [tool.poetry]
-name = "data-migration-platform-api"
+name = "migraflow-api"
 version = "0.1.0"
-description = "AI-assisted Data Migration Platform Backend API and Data Processing Packages"
-authors = ["Lead Architect <architect@migrationplatform.com>"]
+description = "Migraflow - AI-assisted Data Migration Platform Backend API and Engine"
+authors = ["Migraflow Architect <architect@migraflow.com>"]
 readme = "README.md"
 packages = [
     { include = "app" }

@@ -102,8 +102,11 @@ export const planService = {
   /**
    * Poll status of an ongoing or completed plan refinement
    */
-  async getRefinementStatus(planId: string): Promise<PlanRefinementStatusResponse> {
-    const response = await apiClient.get<PlanRefinementStatusResponse>(`/plans/${planId}/refine/status`);
+  async getRefinementStatus(planId: string, taskId?: string): Promise<PlanRefinementStatusResponse> {
+    const url = taskId
+      ? `/plans/${planId}/refine/status?task_id=${encodeURIComponent(taskId)}`
+      : `/plans/${planId}/refine/status`;
+    const response = await apiClient.get<PlanRefinementStatusResponse>(url);
     return response.data;
   },
 

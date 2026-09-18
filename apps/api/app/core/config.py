@@ -8,7 +8,7 @@ load_dotenv(find_dotenv())
 
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "AI Data Migration Platform API"
+    PROJECT_NAME: str = "Migraflow API"
     ENVIRONMENT: str = "development"
     LOG_LEVEL: str = "INFO"
     SECRET_KEY: str = "default_secret_key_change_me_in_production"
@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     # LangSmith AI Observability & Error Tracing
     LANGCHAIN_TRACING_V2: str = "false"
     LANGCHAIN_API_KEY: str = ""
-    LANGCHAIN_PROJECT: str = "ai-data-migration-platform"
+    LANGCHAIN_PROJECT: str = "migraflow-platform"
 
     MAX_CLOUD_ROWS: int = 500_000
     MAX_CLOUD_SIZE_MB: float = 100.0

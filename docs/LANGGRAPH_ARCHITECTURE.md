@@ -1,6 +1,6 @@
 # LangGraph Stateful Agent Architecture Guide (`LANGGRAPH_ARCHITECTURE.md`)
 
-This document provides a comprehensive architectural and educational guide for the **LangGraph Stateful Agent Plan Refinement & Feasibility Validation Engine** powering Phase 5 of the **AI Data Migration Platform**.
+This document provides a comprehensive architectural and educational guide for the **LangGraph Stateful Agent Plan Refinement & Feasibility Validation Engine** powering Phase 5 of **Migraflow**.
 
 ---
 
