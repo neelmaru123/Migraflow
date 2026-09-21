@@ -5,11 +5,16 @@ services:
     build:
       context: ./apps/web
       dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
+        - NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL:-}
     container_name: migration_platform_web
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
+      - NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL:-}
     depends_on:
       - api
     restart: unless-stopped
@@ -19,42 +24,23 @@ services:
       context: ./apps/api
       dockerfile: Dockerfile
     container_name: migration_platform_api
-    command: poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
     environment:
-      - ENVIRONMENT=development
-      - LOG_LEVEL=DEBUG
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres_password@postgres:5432/migration_platform
-      - REDIS_URL=redis://redis:6379/0
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-placeholder}
-    volumes:
-      - ./apps/api:/app
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres_password}@postgres:5432/${POSTGRES_DB:-migration_platform}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-default_jwt_secret_key_change_me_in_production}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:3000}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,*}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/auth/google/callback}
+      - SECRET_KEY=${SECRET_KEY:-default_secret_key_change_me_in_production}
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-
-  worker:
-    build:
-      context: ./apps/api
-      dockerfile: Dockerfile
-    container_name: migration_platform_worker
-    command: poetry run python -m workers.worker.main
-    environment:
-      - ENVIRONMENT=development
-      - LOG_LEVEL=DEBUG
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres_password@postgres:5432/migration_platform
-      - REDIS_URL=redis://redis:6379/0
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-placeholder}
-    volumes:
-      - ./apps/api:/app
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     restart: unless-stopped
 
@@ -62,9 +48,12 @@ services:
     build:
       context: ./apps/agent
       dockerfile: Dockerfile
+    image: data-migration-agent:latest
     container_name: migration_platform_agent
+    profiles: ["agent", "all"]
     environment:
       - API_URL=http://api:8000
+      - AGENT_TOKEN=${AGENT_TOKEN:-}
     depends_on:
       - api
     restart: unless-stopped
@@ -73,23 +62,25 @@ services:
     image: postgres:16-alpine
     container_name: migration_platform_postgres
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres_password
-      - POSTGRES_DB=migration_platform
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres_password}
+      - POSTGRES_DB=${POSTGRES_DB:-migration_platform}
     ports:
-      - "5434:5432"
+      - "${POSTGRES_PORT:-5434}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d migration_platform"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-migration_platform}"]
       interval: 5s
       timeout: 5s
       retries: 5
     restart: unless-stopped
 
+  # Optional Sample Databases for local/demo testing (run with: docker compose --profile sample-dbs up)
   postgres_ecommerce:
     image: postgres:16-alpine
     container_name: migration_platform_postgres_ecommerce
+    profiles: ["sample-dbs", "all"]
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres_password
@@ -108,6 +99,7 @@ services:
   postgres_crm:
     image: postgres:16-alpine
     container_name: migration_platform_postgres_crm
+    profiles: ["sample-dbs", "all"]
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres_password
@@ -126,6 +118,7 @@ services:
   mysql_source:
     image: mysql:8.0
     container_name: migration_platform_mysql
+    profiles: ["sample-dbs", "all"]
     environment:
       - MYSQL_ROOT_PASSWORD=mysql_password
       - MYSQL_DATABASE=inventory_db
@@ -143,6 +136,7 @@ services:
   mongo_source:
     image: mongo:7.0
     container_name: migration_platform_mongo
+    profiles: ["sample-dbs", "all"]
     environment:
       - MONGO_INITDB_ROOT_USERNAME=root
       - MONGO_INITDB_ROOT_PASSWORD=mongo_password
@@ -162,6 +156,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: migration_platform_redis
+    profiles: ["redis", "all"]
     ports:
       - "6379:6379"
     healthcheck:

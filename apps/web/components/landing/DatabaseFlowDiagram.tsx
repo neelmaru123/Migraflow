@@ -8,7 +8,6 @@ interface NodeInfo {
   name: string;
   type: string;
   tables: string[];
-  metrics: string;
   details: string;
 }
 
@@ -18,7 +17,6 @@ const NODES: Record<string, NodeInfo> = {
     name: 'PostgreSQL DB 1 (Source)',
     type: 'Relational DB',
     tables: ['users (id, email, password_hash)', 'user_profiles (user_id, bio, avatar)'],
-    metrics: '750,000 Records | Port 5432',
     details: 'Primary user identity & auth schema dataset. Translates UUID keys and JSONB fields.',
   },
   'source-2': {
@@ -26,7 +24,6 @@ const NODES: Record<string, NodeInfo> = {
     name: 'MySQL DB 2 (Source)',
     type: 'Relational DB',
     tables: ['orders (id, customer_id, total)', 'order_items (order_id, product_id, price)'],
-    metrics: '500,000 Records | Port 3306',
     details: 'E-commerce transactional database. Resolves AUTO_INCREMENT BIGINT to UUID v4 target keys.',
   },
   'ai-engine': {
@@ -34,7 +31,6 @@ const NODES: Record<string, NodeInfo> = {
     name: 'Migraflow AI Engine',
     type: 'Core Translation & ETL',
     tables: ['Polars LazyFrames', 'DuckDB Arrow Memory Cursor', 'Zero-OOM Batch Chunking'],
-    metrics: 'Constant ~45MB RAM Footprint | 42,500 rows/sec',
     details: 'AI infers target database schema, aligns column data types, and streams chunked records deterministically without RAM spikes.',
   },
   'target-db': {
@@ -42,7 +38,6 @@ const NODES: Record<string, NodeInfo> = {
     name: 'Target Unified Warehouse',
     type: 'Target PostgreSQL',
     tables: ['dim_users', 'dim_orders', 'fact_transactions'],
-    metrics: '1,250,000 / 1,250,000 Transferred (100%)',
     details: 'Unified target schema with foreign key constraints, indexes, and primary key validation.',
   },
 };
@@ -80,7 +75,7 @@ export default function DatabaseFlowDiagram() {
               </span>
               <span className="text-sky-400 font-semibold flex items-center gap-2 bg-zinc-900 px-3 py-1 border border-zinc-800">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                STREAM ACTIVE (42,500 ROWS/SEC)
+                STREAM ACTIVE
               </span>
             </div>
 
@@ -175,7 +170,7 @@ export default function DatabaseFlowDiagram() {
                     Migraflow AI Engine
                   </div>
                   <div className="text-[11px] font-mono text-sky-400 font-medium">
-                    ~45MB Constant RAM
+                    Zero-OOM Streaming
                   </div>
                 </button>
               </div>
@@ -208,10 +203,6 @@ export default function DatabaseFlowDiagram() {
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-emerald-400" />
                 <span className="font-bold text-zinc-300">Zero OOM Crashes</span>
-              </div>
-              <div className="flex items-center gap-6 text-xs">
-                <span>Throughput: <strong className="text-sky-400 font-bold">42,500 rows/sec</strong></span>
-                <span>Latency: <strong className="text-sky-400 font-bold">12ms</strong></span>
               </div>
             </div>
           </div>
@@ -250,13 +241,7 @@ export default function DatabaseFlowDiagram() {
               </div>
             </div>
 
-            {/* Metrics Footer */}
-            <div className="pt-4 border-t border-zinc-800">
-              <div className="text-xs font-mono text-zinc-400 uppercase font-semibold">Live Performance Metric</div>
-              <div className="text-xs font-mono font-bold text-sky-400 mt-1">
-                {selectedNode.metrics}
-              </div>
-            </div>
+
           </div>
         </div>
       </div>

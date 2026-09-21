@@ -5,23 +5,27 @@ import React from 'react';
 const steps = [
   {
     number: '01',
-    title: 'Connect Databases',
-    description: 'Provide connection URIs or upload flat files. Credentials are encrypted securely.',
+    title: 'Create Local Docker Agent',
+    description:
+      'Deploy the local Docker agent and configure your database credentials securely. The agent introspects source databases to fetch structural metadata without exposing raw data.',
   },
   {
     number: '02',
-    title: 'Schema Profiling',
-    description: 'Analyzes tables, foreign keys, and column types to generate an optimal transformation plan.',
+    title: 'Generate Plan',
+    description:
+      'The AI engine analyzes source database metadata to automatically generate an optimal target schema blueprint, including table mappings, column type conversions, and DDL.',
   },
   {
     number: '03',
     title: 'Review Plan',
-    description: 'Verify and customize column mappings, type casts, and custom rules before execution.',
+    description:
+      'Inspect how the target schema will look in an interactive blueprint. Suggest changes using natural language feedback or manual edits to refine and regenerate the migration plan.',
   },
   {
     number: '04',
     title: 'Execute & Monitor',
-    description: 'Stream chunked data deterministically with zero memory spikes and live telemetry dashboards.',
+    description:
+      'Execute the migration through your local Docker agent with bounded batch streaming. Track live row counts, table progress, and WebSocket telemetry in real time.',
   },
 ];
 

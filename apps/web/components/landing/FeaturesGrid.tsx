@@ -32,12 +32,9 @@ export default function FeaturesGrid() {
           {/* Feature 2 */}
           <div className="p-8 rounded-none bg-zinc-900/80 border border-zinc-800 hover:border-zinc-700 transition-colors">
             <h3 className="text-lg font-bold text-white mb-2 tracking-tight">Constant RAM Streaming</h3>
-            <p className="text-zinc-400 text-sm leading-relaxed mb-4">
+            <p className="text-zinc-400 text-sm leading-relaxed">
               Streams data iteratively in cursor batches. RAM consumption remains constant regardless of total dataset size.
             </p>
-            <div className="text-xs font-mono text-sky-400 font-semibold tracking-wider uppercase">
-              MEM FOOTPRINT: CONSTANT ~45MB
-            </div>
           </div>
 
           {/* Feature 3 */}
