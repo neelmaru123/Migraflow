@@ -43,7 +43,7 @@ export const DockerCommandOutput: React.FC<DockerCommandOutputProps> = ({
     agent.docker_command ||
     `docker run -d --name agent_${agent.agent_identifier} -e AGENT_TOKEN="${
       agent.api_token || '<YOUR_AGENT_TOKEN>'
-    }" -e BACKEND_URL="http://localhost:8000" ai-data-migration-agent:latest`;
+    }" -e BACKEND_URL="${typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.hostname}:8000` : 'http://localhost:8000'}" data-migration-agent:latest`;
 
   const rawPowershellCmd =
     dockerCmdData?.docker_command_powershell ||
