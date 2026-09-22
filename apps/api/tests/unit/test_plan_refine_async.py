@@ -84,7 +84,7 @@ async def test_async_plan_refinement_background_workflow():
     app.dependency_overrides[get_db] = override_get_db
 
     # Clear refinement task in-memory store
-    RefinementTaskManager._tasks.clear()
+    RefinementTaskManager.clear()
 
     mock_ast = _make_test_ast()
 

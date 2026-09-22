@@ -1948,6 +1948,7 @@ Rebranded all human-facing titles, package definitions, UI layout metadata, docu
 - **Selective Scope**: Updated all user-visible titles, application metadata, API descriptions, and build manifests while preserving internal database schema names and Docker networking hostnames to maintain system stability and avoid breaking active local environments.
 
 ### 3. Impact & Scope
+
 - **Backend Settings**: `PROJECT_NAME="Migraflow API"`, `LANGCHAIN_PROJECT="migraflow-platform"`.
 - **Package Manifests**: Updated `pyproject.toml` (`migraflow-api`, `migraflow-agent`) and `package.json` (`migraflow-web`).
 - **Frontend UI**: Updated root HTML title (`Migraflow — AI Data Migration Platform`) and auth pages.
@@ -1986,3 +1987,30 @@ Engineered a race-condition-free, task-correlated polling architecture for backg
 
 - In-memory `RefinementTaskManager` tracks active and recent tasks with minimal memory overhead while persisting final versions directly to PostgreSQL.
 
+---
+
+## [2026-09-22] - AWS EC2 Production Deployment Readiness Audit & Configuration Hardening
+
+### 1. Decision Summary
+
+Performed a comprehensive pre-deployment audit and configuration hardening for deploying the Migraflow platform to AWS EC2 using Docker Compose:
+
+1. **Docker Compose Environment Parameterization**: Added explicit `BACKEND_URL` and `REDIS_URL` forwarding to `migration_platform_api` in `docker-compose.yml`. This ensures generated on-premise agent Docker run commands correctly route traffic to the EC2 host instead of hardcoding `http://host.docker.internal:8000`.
+2. **Dual Agent API URL Fallback**: Enhanced `apps/agent/main.py` and `docker-compose.yml` to support `API_URL` and `BACKEND_URL` interchangeably, preventing handshake timeouts when the agent runs in Docker compose networks.
+3. **Dynamic Frontend Origin & WebSocket Resolution**: Fortified `axios.ts` and `agentService.ts` to dynamically resolve the browser's `window.location.hostname` when accessing the application via an EC2 Public IP or external domain, ensuring zero broken API/WebSocket connections even if built without pre-defined environment variables.
+4. **Deterministic Agent Docker Build**: Updated `apps/agent/Dockerfile` to copy `poetry.lock` alongside `pyproject.toml` for deterministic, cached container builds.
+5. **Test Teardown Cleanliness**: Added `RefinementTaskManager.clear()` classmethod in `migration_plans_services.py` to fix unit test teardown state isolation.
+
+### 2. Why This Approach? (Rationale)
+
+- **Problem Being Solved**: Deploying directly to an EC2 instance without auditing could cause silent failures:
+  - Frontend calling `http://localhost:8000` from the user's remote browser instead of the EC2 public IP.
+  - CORS blocking remote client requests due to missing wildcard/EC2 origins.
+  - Agent container handshake failures inside Docker networks due to mismatched environment variable names (`API_URL` vs `BACKEND_URL`).
+  - Remote agents failing to reach the API because generated run commands used `host.docker.internal`.
+- **Chosen Solution**: Hardened networking fallbacks across frontend, backend, and Docker Compose configurations, and verified that all 88 unit tests, Agent tests, TypeScript type checks, and Next.js production builds execute with zero errors.
+
+### 3. Trade-offs & Future Considerations
+
+- When deploying without an Nginx reverse proxy, EC2 Security Groups must open ports 3000 (Web) and 8000 (API), while keeping database ports (5434) closed to public internet traffic.
+- For production domains with SSL/HTTPS, setting up Nginx with Let's Encrypt (Certbot) on port 80/443 is recommended to eliminate cross-port CORS entirely.

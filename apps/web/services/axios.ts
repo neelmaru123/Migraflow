@@ -23,7 +23,9 @@ apiClient.interceptors.request.use((config) => {
   if (typeof window !== 'undefined' && (!config.baseURL || config.baseURL.includes('localhost'))) {
     const host = window.location.hostname;
     if (host !== 'localhost' && host !== '127.0.0.1') {
-      config.baseURL = process.env.NEXT_PUBLIC_API_URL || `${window.location.protocol}//${host}:8000/api/v1`;
+      config.baseURL = (process.env.NEXT_PUBLIC_API_URL && !process.env.NEXT_PUBLIC_API_URL.includes('localhost'))
+        ? process.env.NEXT_PUBLIC_API_URL
+        : `${window.location.protocol}//${host}:8000/api/v1`;
     }
   }
 

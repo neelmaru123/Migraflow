@@ -67,12 +67,12 @@ export const agentService = {
     onError?: (err: Event) => void
   ): WebSocket {
     let wsBaseUrl = process.env.NEXT_PUBLIC_WS_URL;
-    if (!wsBaseUrl) {
+    if (!wsBaseUrl || (wsBaseUrl.includes('localhost') && typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1')) {
       if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
         const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         wsBaseUrl = `${proto}//${window.location.hostname}:8000/api/v1`;
       } else {
-        wsBaseUrl = 'ws://localhost:8000/api/v1';
+        wsBaseUrl = wsBaseUrl || 'ws://localhost:8000/api/v1';
       }
     }
     const ws = new WebSocket(`${wsBaseUrl}/agents/ws/${agentId}`);
