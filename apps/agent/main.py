@@ -727,7 +727,7 @@ def start_heartbeat_thread(
 
 def main():
     logger.info("Initializing Docker Agent process...")
-    backend_url = os.getenv("BACKEND_URL", os.getenv("API_BASE_URL", "http://localhost:8000")).replace("/api/v1", "")
+    backend_url = os.getenv("BACKEND_URL", os.getenv("API_URL", os.getenv("API_BASE_URL", "http://localhost:8000"))).replace("/api/v1", "")
     agent_token = os.getenv("AGENT_TOKEN", "")
     version = os.getenv("AGENT_VERSION", "1.0.0")
     run_once = os.getenv("AGENT_RUN_ONCE", "false").lower() == "true"
@@ -850,7 +850,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as unhandled_exc:
-        _backend_url = os.getenv("BACKEND_URL", os.getenv("API_BASE_URL", "http://localhost:8000")).replace("/api/v1", "")
+        _backend_url = os.getenv("BACKEND_URL", os.getenv("API_URL", os.getenv("API_BASE_URL", "http://localhost:8000"))).replace("/api/v1", "")
         _agent_token = os.getenv("AGENT_TOKEN", "")
         _version = os.getenv("AGENT_VERSION", "1.0.0")
         report_fatal_error_and_exit(

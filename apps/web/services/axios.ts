@@ -2,7 +2,17 @@ import axios from 'axios';
 import toast from 'react-hot-toast';
 import Cookies from 'js-cookie';
 
-const baseURL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+const getInitialBaseUrl = (): string => {
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL;
+  }
+  if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+    return `${window.location.protocol}//${window.location.hostname}:8000/api/v1`;
+  }
+  return 'http://localhost:8000/api/v1';
+};
+
+const baseURL = getInitialBaseUrl();
 
 export const apiClient = axios.create({
   baseURL,
@@ -10,6 +20,15 @@ export const apiClient = axios.create({
 });
 
 apiClient.interceptors.request.use((config) => {
+  if (typeof window !== 'undefined' && (!config.baseURL || config.baseURL.includes('localhost'))) {
+    const host = window.location.hostname;
+    if (host !== 'localhost' && host !== '127.0.0.1') {
+      config.baseURL = (process.env.NEXT_PUBLIC_API_URL && !process.env.NEXT_PUBLIC_API_URL.includes('localhost'))
+        ? process.env.NEXT_PUBLIC_API_URL
+        : `${window.location.protocol}//${host}:8000/api/v1`;
+    }
+  }
+
   const activeOrgId = Cookies.get('active_org_id');
   if (activeOrgId && config.headers) {
     config.headers['X-Organization-Id'] = activeOrgId;

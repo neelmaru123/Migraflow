@@ -1,6 +1,7 @@
 import os
-from typing import List, Literal
+from typing import Any, List, Literal
 from dotenv import find_dotenv, load_dotenv
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Automatically load .env variables into process os.environ for LangChain/LangSmith AI tracing
@@ -50,6 +51,20 @@ class Settings(BaseSettings):
     MAX_CLOUD_SIZE_MB: float = 100.0
 
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def assemble_cors_origins(cls, v: Any) -> List[str]:
+        if isinstance(v, str):
+            v_strip = v.strip()
+            if v_strip.startswith("["):
+                import json
+                try:
+                    return json.loads(v_strip)
+                except Exception:
+                    pass
+            return [i.strip() for i in v.split(",") if i.strip()]
+        return v
 
     model_config = SettingsConfigDict(
         env_file=("../../.env", "../.env", ".env"),

@@ -51,6 +51,12 @@ class RefinementTaskManager:
     _lock: asyncio.Lock = asyncio.Lock()
 
     @classmethod
+    def clear(cls) -> None:
+        """Clears all stored tasks (primarily for testing teardown)."""
+        cls._tasks_by_plan.clear()
+        cls._tasks_by_id.clear()
+
+    @classmethod
     async def start_task(cls, plan_id: uuid.UUID, user_prompt: str) -> str:
         async with cls._lock:
             task_id = str(uuid.uuid4())

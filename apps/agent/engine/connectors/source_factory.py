@@ -104,7 +104,19 @@ class SourceConnectorFactory:
                     quoted_pk = _quote_identifier(pk_col, engine_type) if pk_col else None
                     order_by_clause = f" ORDER BY {quoted_pk} ASC" if quoted_pk else ""
                     query = f"SELECT * FROM {quoted_table}{order_by_clause} LIMIT {chunk_size} OFFSET {offset}"
-                    df = _execute_sql_to_polars(query, {})
+                    try:
+                        df = _execute_sql_to_polars(query, {})
+                    except Exception as query_err:
+                        if order_by_clause:
+                            logger.warning(
+                                f"Query with ORDER BY '{quoted_pk}' failed on '{quoted_table}' ({query_err}). "
+                                f"Retrying without ORDER BY..."
+                            )
+                            fallback_query = f"SELECT * FROM {quoted_table} LIMIT {chunk_size} OFFSET {offset}"
+                            df = _execute_sql_to_polars(fallback_query, {})
+                            pk_col = None
+                        else:
+                            raise
 
                 has_more = len(df) == chunk_size
                 next_pk = None

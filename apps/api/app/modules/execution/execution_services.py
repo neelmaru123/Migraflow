@@ -22,6 +22,7 @@ from app.modules.execution.execution_schemas import (
 from app.modules.migration_plans.migration_plans_models import MigrationPlan
 from app.modules.sources.sources_models import DataSource
 from app.modules.metadata.metadata_services import MetadataService
+from app.core.config import settings
 from app.core.logging import logger
 from app.core.websocket_manager import manager
 
@@ -729,7 +730,7 @@ class ExecutionService:
                         cmd_lines.append(f'  -e DEST_DB_URL="{ds_type}://user:<DEST_DST_DB_{dst_i}_PASSWORD>@host.docker.internal:port/{ds.identifier}" \\')
                         dst_i += 1
 
-            cmd_lines.append("  data-migration-agent:latest")
+            cmd_lines.append(f"  {settings.AGENT_DOCKER_IMAGE}")
             copyable_cmd = "\n".join(cmd_lines)
 
         job.ai_diagnosis = {
