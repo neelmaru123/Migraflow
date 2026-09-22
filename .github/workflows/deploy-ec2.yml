@@ -1,0 +1,43 @@
+name: Deploy to AWS EC2
+
+on:
+  push:
+    branches:
+      - main
+      - production
+      - Neel
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy Application to EC2
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          script_stop: true
+          script: |
+            echo "=== Navigating to project directory ==="
+            cd /home/ubuntu/Migraflow || cd ~/Migraflow
+
+            echo "=== Pulling latest changes from branch: ${{ github.ref_name }} ==="
+            git fetch origin ${{ github.ref_name }}
+            git checkout ${{ github.ref_name }}
+            git pull origin ${{ github.ref_name }}
+
+            echo "=== Building and launching updated Docker containers ==="
+            docker compose up -d --build
+
+            echo "=== Pruning dangling Docker build cache and images ==="
+            docker image prune -f
+
+            echo "=== Verifying running services ==="
+            docker compose ps
