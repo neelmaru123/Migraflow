@@ -50,9 +50,9 @@ class Settings(BaseSettings):
     MAX_CLOUD_ROWS: int = 500_000
     MAX_CLOUD_SIZE_MB: float = 100.0
 
-    CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    CORS_ORIGINS: List[str] | str = ["http://localhost:3000", "http://127.0.0.1:3000"]
 
-    @field_validator("CORS_ORIGINS", mode="before")
+    @field_validator("CORS_ORIGINS", mode="after")
     @classmethod
     def assemble_cors_origins(cls, v: Any) -> List[str]:
         if isinstance(v, str):
