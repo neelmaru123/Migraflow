@@ -2014,3 +2014,29 @@ Performed a comprehensive pre-deployment audit and configuration hardening for d
 
 - When deploying without an Nginx reverse proxy, EC2 Security Groups must open ports 3000 (Web) and 8000 (API), while keeping database ports (5434) closed to public internet traffic.
 - For production domains with SSL/HTTPS, setting up Nginx with Let's Encrypt (Certbot) on port 80/443 is recommended to eliminate cross-port CORS entirely.
+
+---
+
+## [2026-09-23] - MySQL Duplicate Index Name (Error 1061) Benign Post-Migration DDL Handling
+
+### 1. Decision Summary
+Added `"duplicate key name"`, `"duplicate key"`, and `"1061"` to the `benign_keywords` list in [`apps/agent/engine/ddl_executor.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/ddl_executor.py). This allows existing MySQL indexes to be gracefully skipped as benign warnings during Post-Migration DDL execution instead of crashing the migration job with a `RuntimeError` after data extraction and insertion have completed.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**:
+  - In migrations targeting MySQL where the target database already has pre-existing tables or indexes (e.g., re-running migrations, appending data, or running without Clean Wipe), Post-Migration DDL statements like `CREATE INDEX idx_orders_customer_id ON orders(customer_id);` fail with `pymysql.err.OperationalError: (1061, "Duplicate key name 'idx_orders_customer_id'")`.
+  - While PostgreSQL and SQLite report `relation ... already exists` (which matched the existing `"already exists"` filter), MySQL uses the distinct phrasing `"Duplicate key name"` and error code `1061`.
+  - Because `"duplicate key name"` was missing from `benign_keywords`, `DDLExecutor` treated this benign warning as a fatal unhandled error, raising `RuntimeError` and marking the entire job as failed even after hundreds of thousands of records were successfully bulk-inserted.
+- **Chosen Solution**:
+  - Expanded `benign_keywords` in [`apps/agent/engine/ddl_executor.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/ddl_executor.py) to include `"duplicate key name"`, `"duplicate key"`, and `"1061"`.
+  - Added unit test in [`apps/api/tests/unit/test_bug_fix11_ddl_and_sql_correctness.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_bug_fix11_ddl_and_sql_correctness.py) to prevent regressions.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Rewriting SQL to `CREATE INDEX IF NOT EXISTS`**:
+  - _Rejected_: MySQL only added `CREATE INDEX IF NOT EXISTS` syntax in MySQL 8.0.30+, and attempting this syntax on earlier versions or other dialects triggers syntax errors. Catching the standard MySQL error code 1061 in the execution engine is backward-compatible with all MySQL versions (5.7, 8.0, MariaDB).
+- **Alternative B: Silencing all Post-Migration DDL errors**:
+  - _Rejected_: Genuine DDL errors (such as invalid column names, syntax errors, or unresolvable foreign key targets) must continue to raise `RuntimeError` to alert operators.
+
+### 4. Trade-offs & Future Considerations
+- Target database pre-checks can also introspect existing indexes before submitting DDL statements, reducing the need for exception-based flow control.
+
