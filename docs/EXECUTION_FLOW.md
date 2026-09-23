@@ -1101,5 +1101,31 @@ sequenceDiagram
 ## 3. Impact & Delta Analysis
 
 - **[MODIFIED]**: [`apps/agent/engine/writers/target_writer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py) — Added recursive `_sanitize_value_for_mongo()`, residual container promotion, and primary key promotion for MongoDB targets.
-- **[MODIFIED]**: [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py) — Added residual dictionary flattening in `_serialize_residual()` to prevent multi-hop double wrapping.
 - **[NEW]**: [`apps/agent/tests/test_mongo_object_unpacking.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/tests/test_mongo_object_unpacking.py) — Unit test suite verifying PostgreSQL & MySQL JSON unpacking, BSON conversions, and SQL target safety.
+
+---
+
+# Execution Flow — MySQL Duplicate Index Name (1061) Benign Handling in Post-Migration DDL
+
+## 1. Entry Point
+- **File**: [`apps/agent/engine/ddl_executor.py:L365`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/ddl_executor.py#L365) (`DDLExecutor.execute_ddl_list`)
+- **Trigger**: Invoked by [`ExecutionOrchestrator.run_job()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/orchestrator.py#L350) in Step 3 (Post-Migration DDL) after all data chunks are bulk-inserted into the target database.
+
+## 2. Step-by-Step Execution Sequence
+1. **DDL Statement Sanitation**:
+   - `DDLExecutor._sanitize_ddl_statement()` strips incompatible dialect keywords (e.g., PostgreSQL `CREATE EXTENSION` on MySQL).
+2. **DDL Statement Execution**:
+   - Executes `CREATE INDEX idx_orders_customer_id ON orders(customer_id);` against target MySQL engine.
+3. **Exception Handling & Benign Classification**:
+   - If MySQL throws `pymysql.err.OperationalError: (1061, "Duplicate key name 'idx_orders_customer_id'")`:
+   - Inspects error string against `benign_keywords`:
+     - Matches `"duplicate key name"`, `"duplicate key"`, or `"1061"`.
+   - Logs warning: `logger.warning(f"Post-Migration DDL notice/warning for statement '{stmt_clean}': {exc}")`.
+   - Continues safely to next DDL statement without raising `RuntimeError`.
+4. **Job Completion**:
+   - `ExecutionOrchestrator` completes job cleanly and reports status `completed` to Control Plane.
+
+## 3. Impact & Delta Analysis
+- **[MODIFIED]**: [`apps/agent/engine/ddl_executor.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/ddl_executor.py) — Added `"duplicate key name"`, `"duplicate key"`, and `"1061"` to `benign_keywords`.
+- **[MODIFIED]**: [`apps/api/tests/unit/test_bug_fix11_ddl_and_sql_correctness.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_bug_fix11_ddl_and_sql_correctness.py) — Added unit test assertion validating MySQL error 1061 does not raise RuntimeError.
+

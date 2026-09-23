@@ -32,7 +32,7 @@ def test_ddl_failure_raises_exception_for_genuine_error():
     mock_conn1.execute.side_effect = Exception("syntax error at or near 'INVALID'")
     mock_engine.begin.return_value.__enter__.return_value = mock_conn1
 
-    with patch("execution_engine._get_engine", return_value=mock_engine):
+    with patch("engine.ddl_executor._get_engine", return_value=mock_engine):
         with pytest.raises(RuntimeError) as exc_info:
             DDLExecutor.execute_ddl_list("sqlite:///:memory:", ["INVALID DDL SYNTAX;"])
         assert "DDL execution failed" in str(exc_info.value) or "DDL error" in str(exc_info.value) or "DDL failed" in str(exc_info.value)
@@ -42,9 +42,18 @@ def test_ddl_failure_raises_exception_for_genuine_error():
     mock_conn2.execute.side_effect = Exception("table users already exists")
     mock_engine.begin.return_value.__enter__.return_value = mock_conn2
 
-    with patch("execution_engine._get_engine", return_value=mock_engine):
+    with patch("engine.ddl_executor._get_engine", return_value=mock_engine):
         # Should not raise exception
         DDLExecutor.execute_ddl_list("sqlite:///:memory:", ["CREATE TABLE users (id INT);"])
+
+    # 3. Benign MySQL "Duplicate key name" (error 1061) does NOT raise RuntimeError
+    mock_conn3 = MagicMock()
+    mock_conn3.execute.side_effect = Exception('(1061, "Duplicate key name \'idx_orders_customer_id\'")')
+    mock_engine.begin.return_value.__enter__.return_value = mock_conn3
+
+    with patch("engine.ddl_executor._get_engine", return_value=mock_engine):
+        # Should not raise exception
+        DDLExecutor.execute_ddl_list("sqlite:///:memory:", ["CREATE INDEX idx_orders_customer_id ON orders(customer_id);"], "Post-Migration DDL")
 
 
 def test_mysql_row_count_estimate_query():

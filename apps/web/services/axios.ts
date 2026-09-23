@@ -7,6 +7,9 @@ const getInitialBaseUrl = (): string => {
     return process.env.NEXT_PUBLIC_API_URL;
   }
   if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+    if (window.location.protocol === 'https:') {
+      return `${window.location.origin}/api/v1`;
+    }
     return `${window.location.protocol}//${window.location.hostname}:8000/api/v1`;
   }
   return 'http://localhost:8000/api/v1';
@@ -20,12 +23,19 @@ export const apiClient = axios.create({
 });
 
 apiClient.interceptors.request.use((config) => {
-  if (typeof window !== 'undefined' && (!config.baseURL || config.baseURL.includes('localhost'))) {
+  if (typeof window !== 'undefined') {
     const host = window.location.hostname;
-    if (host !== 'localhost' && host !== '127.0.0.1') {
-      config.baseURL = (process.env.NEXT_PUBLIC_API_URL && !process.env.NEXT_PUBLIC_API_URL.includes('localhost'))
-        ? process.env.NEXT_PUBLIC_API_URL
-        : `${window.location.protocol}//${host}:8000/api/v1`;
+    const isLocal = host === 'localhost' || host === '127.0.0.1';
+
+    if (!isLocal) {
+      if (process.env.NEXT_PUBLIC_API_URL && !process.env.NEXT_PUBLIC_API_URL.includes('localhost')) {
+        config.baseURL = process.env.NEXT_PUBLIC_API_URL;
+      } else if (window.location.protocol === 'https:' && (!config.baseURL || config.baseURL.includes(':8000'))) {
+        // Strip out :8000 over HTTPS since Nginx proxies /api/ via port 443
+        config.baseURL = `${window.location.origin}/api/v1`;
+      } else if (!config.baseURL || config.baseURL.includes('localhost')) {
+        config.baseURL = `${window.location.protocol}//${host}:8000/api/v1`;
+      }
     }
   }
 
