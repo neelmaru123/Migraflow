@@ -1103,3 +1103,77 @@ sequenceDiagram
 - **[MODIFIED]**: [`apps/agent/engine/writers/target_writer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py) — Added recursive `_sanitize_value_for_mongo()`, residual container promotion, and primary key promotion for MongoDB targets.
 - **[MODIFIED]**: [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py) — Added residual dictionary flattening in `_serialize_residual()` to prevent multi-hop double wrapping.
 - **[NEW]**: [`apps/agent/tests/test_mongo_object_unpacking.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/tests/test_mongo_object_unpacking.py) — Unit test suite verifying PostgreSQL & MySQL JSON unpacking, BSON conversions, and SQL target safety.
+
+---
+
+# Execution Flow — Google ADK (Agent Development Kit) Plan Generation & Refinement Engine
+
+## 1. Entry Point
+
+- **Files**:
+  - [`apps/api/app/modules/migration_plans/migration_plans_services.py:MigrationPlanService.execute_async_generation_worker()`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py)
+  - [`apps/api/app/modules/migration_plans/migration_plans_services.py:MigrationPlanService.execute_refinement_core()`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py)
+- **Triggers**:
+  - `POST /api/v1/plans/generate-async`
+  - `POST /api/v1/plans/{plan_id}/refine-async`
+
+## 2. Step-by-Step Execution Sequence
+
+```mermaid
+sequenceDiagram
+    participant API as FastAPI Ingress / Worker
+    participant LLM as migration_plans_llm.py (Adapter)
+    participant ADK as GoogleADKMigrationEngine (adk/agents.py)
+    participant Gemini as Gemini 3.5 Flash Lite (google-genai)
+    participant Tools as ADK Sandboxed Tools (sqlglot / topology)
+    participant WS as WebSocket Manager
+
+    API->>LLM: llm_plan_generator.generate(context_str, target_db_type)
+    LLM->>ADK: Route to ADK when LLM_ENGINE_TYPE == 'google_adk'
+    ADK->>WS: Emit 'inspect_schema' progress event
+    ADK->>Gemini: generate_content(prompt, response_schema=TransformationPlanAST)
+    Gemini-->>ADK: Parsed TransformationPlanAST JSON
+    ADK->>WS: Emit 'audit_plan' progress event
+    ADK->>Tools: validate_ddl_batch(pre_migration_ddl, post_migration_ddl)
+    Tools-->>ADK: DDL Linter report (syntax errors / warnings)
+    alt DDL Syntax Invalid
+        ADK->>Gemini: Re-prompt with specific DDL syntax errors
+        Gemini-->>ADK: Corrected TransformationPlanAST
+    end
+    ADK->>WS: Emit 'completed' progress event
+    ADK-->>LLM: Validated TransformationPlanAST
+    LLM-->>API: Validated TransformationPlanAST
+```
+
+1. **Service Ingress**:
+   - `MigrationPlanService` serializes metadata snapshots into YAML context.
+   - Calls `llm_plan_generator.generate(context_str, target_db_type)` or `llm_plan_generator.refine(...)`.
+2. **Engine Adapter Routing**:
+   - `LLMPlanGeneratorService` checks `settings.LLM_ENGINE_TYPE`.
+   - When `"google_adk"` (default) and `settings.LLM_PROVIDER == "gemini"`, delegates directly to `adk_plan_generator.generate(...)`.
+3. **Google ADK Multi-Phase Reasoning**:
+   - **Phase 1 (Schema & Topology)**: Emits `inspect_schema` progress event to connected WebSocket clients.
+   - **Phase 2 (Gemini Inference)**: Calls `google.genai.Client.models.generate_content(...)` using `gemini-3.5-flash-lite`, configuring `response_mime_type="application/json"` and `response_schema=TransformationPlanAST`.
+   - **Phase 3 (Active Tool Auditing)**:
+     - Runs `validate_ddl_batch` on `pre_migration_ddl` and `post_migration_ddl` using `sqlglot`.
+     - Validates two-phase DDL hygiene (no inline FKs in pre-migration DDL, dialect-compliant UUID syntax).
+     - If syntax errors are caught, auto-prompts with error feedback to correct the DDL.
+   - **Phase 4 (Refinement Feasibility Guarantee)**:
+     - For plan refinements, evaluates user instructions against zero-data-loss feasibility.
+     - Sets `refinement_feedback` (`applied`, `verdict`, `explanation`, `table_count_before`, `table_count_after`, `changes_summary`).
+4. **Return & Persistence**:
+   - Returns guaranteed Pydantic `TransformationPlanAST` instance to the service.
+   - Plan is validated by `MigrationPlanValidator`, saved as draft / versioned snapshot, and broadcast over WebSockets.
+
+## 3. Impact & Delta Analysis
+
+- **[NEW]**: [`apps/api/app/modules/migration_plans/migration_plans_engine/adk/agents.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_engine/adk/agents.py) — Google ADK multi-agent orchestrator powered by `gemini-3.5-flash-lite`.
+- **[NEW]**: [`apps/api/app/modules/migration_plans/migration_plans_engine/adk/adk_plan_generator.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_engine/adk/adk_plan_generator.py) — Plan generator service adapter.
+- **[NEW]**: [`apps/api/app/modules/migration_plans/migration_plans_engine/adk/tools/ddl_linter_tool.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_engine/adk/tools/ddl_linter_tool.py) — `sqlglot` DDL dialect syntax validator.
+- **[NEW]**: [`apps/api/app/modules/migration_plans/migration_plans_engine/adk/tools/type_compatibility_tool.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_engine/adk/tools/type_compatibility_tool.py) — Cross-database column type checker.
+- **[NEW]**: [`apps/api/app/modules/migration_plans/migration_plans_engine/adk/tools/fk_topology_tool.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_engine/adk/tools/fk_topology_tool.py) — Foreign key topological cycle detector.
+- **[NEW]**: [`apps/api/tests/unit/test_adk_plan_generator.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_adk_plan_generator.py) — 9 unit tests for tools and ADK engine.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_engine/migration_plans_llm.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_engine/migration_plans_llm.py) — Dynamic routing to ADK engine.
+- **[MODIFIED]**: [`apps/api/app/core/config.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/core/config.py) — Added `LLM_ENGINE_TYPE` configuration option.
+- **[MODIFIED]**: [`apps/api/pyproject.toml`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/pyproject.toml) — Added `google-genai` and `sqlglot`.
+

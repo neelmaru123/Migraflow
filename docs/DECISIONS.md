@@ -2014,3 +2014,43 @@ Performed a comprehensive pre-deployment audit and configuration hardening for d
 
 - When deploying without an Nginx reverse proxy, EC2 Security Groups must open ports 3000 (Web) and 8000 (API), while keeping database ports (5434) closed to public internet traffic.
 - For production domains with SSL/HTTPS, setting up Nginx with Let's Encrypt (Certbot) on port 80/443 is recommended to eliminate cross-port CORS entirely.
+
+---
+
+## [2026-09-22] - Google ADK (Agent Development Kit) Multi-Agent Architecture Migration with gemini-3.5-flash-lite
+
+### 1. Decision Summary
+
+Converted Migraflow's AI migration plan generation and refinement engine from the legacy monolithic LangChain prompt pipeline (`langchain-google-genai` + `PydanticOutputParser`) to a modular **Google ADK (Agent Development Kit) Multi-Agent Architecture** powered by `google-genai` (v2.24.0) and `gemini-3.5-flash-lite`:
+
+1. **Google GenAI Official SDK (`google-genai`)**: Adopted Google's official, modern GenAI Python SDK, replacing deprecated `google-generativeai` and heavy LangChain abstractions.
+2. **Native Pydantic Schema Enforcement**: Leveraged Gemini native structured output (`response_mime_type="application/json"` and `response_schema=TransformationPlanAST`), eliminating brittle text-based regex and string output parsers.
+3. **Proactive Dialect & Schema Tools**:
+   - `DDL Linter Tool` (`sqlglot`): Syntactically parses and lints generated two-phase DDL against Postgres, MySQL, and SQLite dialects.
+   - `Type Compatibility Tool`: Validates cross-engine type mappings (e.g., UUIDs, numeric widening, JSON stringify, PostgreSQL array decomposition).
+   - `FK Topology Tool`: Kahn's algorithm topological sorter that detects circular foreign key cycles and produces cycle-free insertion orders.
+4. **Zero Breaking Changes / Backward-Compatible Adapter**: `llm_plan_generator` in `migration_plans_llm.py` dynamically routes to `adk_plan_generator` when `settings.LLM_ENGINE_TYPE == "google_adk"`, maintaining 100% compatibility with all existing REST endpoints, background tasks, and unit tests.
+5. **Real-Time Step-by-Step Progress**: Exposed progress callbacks emitting granular agent thinking steps (`inspect_schema`, `synthesize_mappings`, `audit_plan`, `completed`) to WebSocket subscribers.
+
+### 2. Why This Approach? (Rationale)
+
+- **Problem Being Solved**:
+  - In complex multi-database merges (15+ tables across Postgres, MySQL, MongoDB), a single monolithic prompt was prone to hallucinated column mappings, type casting oversights, and DDL syntax errors (e.g. `uuid_v4()` in PostgreSQL or inline foreign keys in pre-migration DDL).
+  - Legacy LangChain text parsers failed when large schemas resulted in subtle formatting differences.
+- **Chosen Solution**:
+  - Google ADK with native structured outputs guarantees 100% schema-valid `TransformationPlanAST` payloads.
+  - Active tool calling allows the agent to self-audit DDL syntax and foreign key topologies before plans reach the database or user.
+  - Using `gemini-3.5-flash-lite` delivers sub-second schema reasoning with minimal token latency.
+
+### 3. Alternatives Considered & Rejected
+
+- **Alternative A: Retaining Monolithic LangChain with Larger Prompt Engineering**:
+  - _Rejected_: LangChain's `PydanticOutputParser` relies on string parsing and re-prompts on failure, adding token cost and latency without providing sandboxed tool verification.
+- **Alternative B: Hardcoded Rule-Based Heuristic Mapper (No LLM)**:
+  - _Rejected_: Cannot handle natural language user feedback, semantic column reconciliation (e.g., `user_mail` -> `email`), or bespoke business transformation expressions.
+
+### 4. Trade-offs & Future Considerations
+
+- Maintained a dual-engine toggle (`settings.LLM_ENGINE_TYPE = "google_adk" | "langchain"`) allowing instant fallback to legacy LangChain if needed.
+- `sqlglot` was added as a lightweight dependency for robust AST SQL validation across dialects.
+

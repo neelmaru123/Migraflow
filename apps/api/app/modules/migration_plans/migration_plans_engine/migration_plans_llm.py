@@ -6,7 +6,7 @@ Implements:
 """
 
 import logging
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from app.core.config import settings
 from app.modules.metadata.metadata_models import (
@@ -324,6 +324,7 @@ class LLMPlanGeneratorService:
         self,
         context_str: str,
         target_db_type: str,
+        progress_callback: Optional[Callable[[str, str], None]] = None,
     ) -> TransformationPlanAST:
         """
         Calls LLM with system prompt + sanitized metadata context.
@@ -333,6 +334,14 @@ class LLMPlanGeneratorService:
         Returns a validated TransformationPlanAST instance.
         Raises RuntimeError if all retries are exhausted.
         """
+        if settings.LLM_ENGINE_TYPE == "google_adk" and settings.LLM_PROVIDER == "gemini":
+            from app.modules.migration_plans.migration_plans_engine.adk import adk_plan_generator
+            return adk_plan_generator.generate(
+                context_str=context_str,
+                target_db_type=target_db_type,
+                progress_callback=progress_callback,
+            )
+
         from langchain_core.messages import HumanMessage, SystemMessage
         from langchain_core.output_parsers import PydanticOutputParser
 
@@ -390,11 +399,23 @@ class LLMPlanGeneratorService:
         user_feedback: Optional[str] = None,
         validation_errors: Optional[List[str]] = None,
         max_retries: int = 3,
+        progress_callback: Optional[Callable[[str, str], None]] = None,
     ) -> TransformationPlanAST:
         """
         Refines an existing TransformationPlanAST given user feedback or validation error feedback.
         Includes a 3-attempt retry loop with schema validation feedback.
         """
+        if settings.LLM_ENGINE_TYPE == "google_adk" and settings.LLM_PROVIDER == "gemini":
+            from app.modules.migration_plans.migration_plans_engine.adk import adk_plan_generator
+            return adk_plan_generator.refine(
+                context_str=context_str,
+                current_ast_dict=current_ast_dict,
+                user_feedback=user_feedback,
+                validation_errors=validation_errors,
+                max_retries=max_retries,
+                progress_callback=progress_callback,
+            )
+
         import json
         from langchain_core.messages import HumanMessage, SystemMessage
         from langchain_core.output_parsers import PydanticOutputParser

@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     LLM_PROVIDER: Literal["gemini", "openai"] = "gemini"
+    LLM_ENGINE_TYPE: Literal["google_adk", "langchain"] = "google_adk"
     LLM_MODEL: str = "gemini-3.5-flash-lite"
     LLM_TEMPERATURE: float = 0.0
     LLM_MAX_RETRIES: int = 2

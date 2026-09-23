@@ -66,3 +66,9 @@ Thumbs.db
 *.zip
 tmp/
 scratch/
+
+# Agent & Video artifacts
+.agent/
+.agents/
+brag-output/
+brag-output*/

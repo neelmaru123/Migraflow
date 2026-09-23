@@ -438,16 +438,7 @@ class MigrationPlanService:
         plan_ast_dict = None
         val_res_dict = None
 
-        try:
-            res_state = await migration_plan_graph.ainvoke(initial_state)
-            plan_ast_dict = res_state.get("current_ast")
-            val_res_dict = res_state.get("validation_result")
-            if res_state.get("feasibility_explanation"):
-                plan_status = "invalid"
-            else:
-                plan_status = "draft"
-        except Exception as exc:
-            logger.error(f"LangGraph execution exception: {exc}")
+        if settings.LLM_ENGINE_TYPE == "google_adk":
             context_str = MetadataContextSerializer.serialize(
                 snapshots=snapshots,
                 source_aliases=alias_map,
@@ -455,14 +446,66 @@ class MigrationPlanService:
                 custom_instructions=custom_instructions,
             )
             try:
-                ast_obj = llm_plan_generator.generate(context_str, target_db_type)
+                loop = asyncio.get_running_loop()
+                def progress_cb(stage: str, msg: str):
+                    try:
+                        asyncio.run_coroutine_threadsafe(
+                            manager.broadcast_to_agent(
+                                agent_id=str(agent.id),
+                                message={
+                                    "event_type": "PLAN_GENERATION_PROGRESS",
+                                    "data": {
+                                        "plan_id": str(plan_id),
+                                        "agent_id": str(agent.id),
+                                        "stage": stage,
+                                        "message": msg,
+                                    },
+                                }
+                            ),
+                            loop,
+                        )
+                    except Exception:
+                        pass
+
+                ast_obj = await asyncio.to_thread(
+                    llm_plan_generator.generate,
+                    context_str=context_str,
+                    target_db_type=target_db_type,
+                    progress_callback=progress_cb,
+                )
                 plan_ast_dict = ast_obj.model_dump(mode="json")
                 val_res = MigrationPlanValidator.validate(plan_ast_dict, snapshots, alias_map)
                 val_res_dict = val_res.model_dump(mode="json")
                 plan_status = "draft"
-            except Exception as inner_exc:
-                logger.error(f"Fallback generation also failed: {inner_exc}")
+            except Exception as exc:
+                logger.error(f"Google ADK generation exception: {exc}")
                 plan_status = "draft_failed"
+        else:
+            try:
+                res_state = await migration_plan_graph.ainvoke(initial_state)
+                plan_ast_dict = res_state.get("current_ast")
+                val_res_dict = res_state.get("validation_result")
+                if res_state.get("feasibility_explanation"):
+                    plan_status = "invalid"
+                else:
+                    plan_status = "draft"
+            except Exception as exc:
+                logger.error(f"LangGraph execution exception: {exc}")
+                context_str = MetadataContextSerializer.serialize(
+                    snapshots=snapshots,
+                    source_aliases=alias_map,
+                    target_db_type=target_db_type,
+                    custom_instructions=custom_instructions,
+                )
+                try:
+                    ast_obj = llm_plan_generator.generate(context_str, target_db_type)
+                    plan_ast_dict = ast_obj.model_dump(mode="json")
+                    val_res = MigrationPlanValidator.validate(plan_ast_dict, snapshots, alias_map)
+                    val_res_dict = val_res.model_dump(mode="json")
+                    plan_status = "draft"
+                except Exception as inner_exc:
+                    logger.error(f"Fallback generation also failed: {inner_exc}")
+                    plan_status = "draft_failed"
 
         if not val_res_dict and plan_ast_dict:
             val_res = MigrationPlanValidator.validate(plan_ast_dict, snapshots, alias_map)
