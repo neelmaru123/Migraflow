@@ -42,6 +42,14 @@ services:
       - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/auth/google/callback}
       - SECRET_KEY=${SECRET_KEY:-default_secret_key_change_me_in_production}
       - AGENT_DOCKER_IMAGE=${AGENT_DOCKER_IMAGE:-data-migration-agent:latest}
+      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2:-true}
+      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY:-}
+      - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-Migraflow Platform}
+      - LANGCHAIN_ENDPOINT=${LANGCHAIN_ENDPOINT:-https://api.smith.langchain.com}
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING:-true}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-Migraflow Platform}
+      - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
     depends_on:
       postgres:
         condition: service_healthy

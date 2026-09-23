@@ -9,7 +9,8 @@ export function middleware(request: NextRequest) {
   const refreshToken = request.cookies.get('refresh_token')?.value;
   const loggedInCookie = request.cookies.get('logged_in')?.value;
 
-  const isAuthenticated = Boolean(accessToken || refreshToken || loggedInCookie === 'true');
+  const hasToken = Boolean(accessToken || refreshToken);
+  const isAuthenticated = Boolean(hasToken || loggedInCookie === 'true');
 
   // Route classifications
   const isPublicAuthRoute = pathname === '/' || pathname === '/login' || pathname === '/register';
@@ -22,8 +23,8 @@ export function middleware(request: NextRequest) {
     pathname.startsWith('/execution') ||
     pathname.startsWith('/profiling');
 
-  // 1. Signed-in users: Redirect away from landing/login/register to /dashboard
-  if (isAuthenticated && isPublicAuthRoute) {
+  // 1. Signed-in users: Redirect away from landing/login/register to /dashboard ONLY if they actually have a token
+  if (hasToken && isPublicAuthRoute) {
     return NextResponse.redirect(new URL('/dashboard', request.url));
   }
 
