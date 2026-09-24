@@ -13,8 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.db import AsyncSessionLocal
+from app.core.state import (
+    ExecutionEventType,
+    ExecutionLifecycle,
+    InvalidStateTransitionError,
+)
 from app.modules.agents.agents_models import Agent
-from app.modules.execution.execution_models import MigrationJob
+from app.modules.execution.execution_models import AgentRun, ExecutionEvent, MigrationJob
+from app.modules.execution.execution_state_machine import ExecutionStateMachine
 from app.modules.execution.execution_schemas import (
     ExecutionProgressUpdate,
     ExecutionStartRequest,
@@ -105,6 +111,7 @@ class ExecutionService:
         plan_id: uuid.UUID,
         is_dry_run: bool = False,
         truncate_target: bool = False,
+        idempotency_key: Optional[str] = None,
     ) -> MigrationJob:
         # Check plan existence and ownership
         stmt_plan = select(MigrationPlan).where(
@@ -129,6 +136,25 @@ class ExecutionService:
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Cannot execute unapproved migration plan. Plan status is '{plan.status}'. User approval is required.",
             )
+
+        # Idempotency check: if an idempotency key is provided, return existing job if already submitted
+        clean_idempotency_key = idempotency_key.strip() if idempotency_key else None
+        if clean_idempotency_key:
+            stmt_idem = (
+                select(MigrationJob)
+                .join(MigrationPlan, MigrationJob.migration_plan_id == MigrationPlan.id)
+                .where(
+                    MigrationJob.idempotency_key == clean_idempotency_key,
+                    MigrationPlan.user_id == user_id,
+                )
+            )
+            res_idem = await session.execute(stmt_idem)
+            existing_job = res_idem.scalar_one_or_none()
+            if existing_job:
+                logger.info(
+                    f"Idempotent execution request matched existing job '{existing_job.id}' for key '{clean_idempotency_key}'."
+                )
+                return existing_job
 
         # Check for active running job for this plan
         stmt_active = select(MigrationJob).where(
@@ -203,10 +229,12 @@ class ExecutionService:
                 f"Preflight alert for plan '{plan_id}': Target tables already contain rows: {existing_data_warnings}"
             )
 
+        now = datetime.now(timezone.utc)
         job = MigrationJob(
             migration_plan_id=plan_id,
             agent_id=plan.agent_id,
-            status="queued",
+            idempotency_key=clean_idempotency_key,
+            status=ExecutionLifecycle.QUEUED.value,
             is_dry_run=is_dry_run,
             truncate_target=truncate_target,
             total_rows=0,
@@ -215,8 +243,32 @@ class ExecutionService:
             failed_rows=0,
             progress=0.0,
             current_stage="queued",
+            created_at=now,
+            updated_at=now,
         )
         session.add(job)
+        await session.flush()
+
+        # Emit durable append-only JOB_CREATED event
+        event = ExecutionEvent(
+            id=uuid.uuid4(),
+            event_id=uuid.uuid4(),
+            migration_job_id=job.id,
+            migration_plan_id=plan_id,
+            event_type=ExecutionEventType.JOB_CREATED.value,
+            actor_type="user",
+            actor_id=str(user_id),
+            timestamp=now,
+            payload={
+                "action": "job_created",
+                "job_id": str(job.id),
+                "is_dry_run": is_dry_run,
+                "truncate_target": truncate_target,
+                "idempotency_key": clean_idempotency_key,
+            },
+            schema_version=1,
+        )
+        session.add(event)
         await session.commit()
         await session.refresh(job)
 
@@ -224,7 +276,7 @@ class ExecutionService:
         setattr(job, "target_tables_with_existing_data", existing_data_warnings)
 
         logger.info(
-            f"Created execution job '{job.id}' for plan '{plan_id}' (Agent ID: {plan.agent_id})."
+            f"Created execution job '{job.id}' for plan '{plan_id}' (Agent ID: {plan.agent_id}, IdempotencyKey: {clean_idempotency_key})."
         )
         return job
 
@@ -283,7 +335,20 @@ class ExecutionService:
 
         stmt_fetch = select(MigrationJob).where(MigrationJob.id.in_(job_ids))
         res_fetch = await session.execute(stmt_fetch)
-        return list(res_fetch.scalars().all())
+        jobs = list(res_fetch.scalars().all())
+
+        for job in jobs:
+            # Instantiate first-class AgentRun execution attempt and emit event
+            await ExecutionStateMachine.create_agent_run(
+                session=session,
+                job=job,
+                agent_id=agent_id,
+                status=ExecutionLifecycle.PREPARING,
+                actor_type="agent",
+                actor_id=str(agent_id),
+            )
+        await session.commit()
+        return jobs
 
     @staticmethod
     async def check_stale_jobs(
@@ -305,12 +370,17 @@ class ExecutionService:
         if not stale_jobs:
             return 0
 
-        now = datetime.now(timezone.utc)
         for job in stale_jobs:
-            job.status = "failed"
-            job.completed_at = now
-            job.error_message = (
+            err = (
                 f"Migration job stalled: no progress updates received from agent for over {stale_threshold_seconds} seconds."
+            )
+            await ExecutionStateMachine.transition_job(
+                session=session,
+                job=job,
+                target_state=ExecutionLifecycle.FAILED,
+                actor_type="watchdog",
+                actor_id="watchdog",
+                reason=err,
             )
             logger.error(
                 f"Watchdog failed stale job '{job.id}' (last updated: {job.updated_at})."
@@ -376,18 +446,23 @@ class ExecutionService:
                 detail=f"Execution job '{job_id}' not found or access denied.",
             )
 
-        if job.status not in ["queued", "preparing", "running"]:
+        # Enforce legal transition to CANCELLED via state machine
+        try:
+            await ExecutionStateMachine.transition_job(
+                session=session,
+                job=job,
+                target_state=ExecutionLifecycle.CANCELLED,
+                actor_type="user",
+                actor_id=str(user_id),
+                reason=reason or "Execution cancelled by user.",
+            )
+        except InvalidStateTransitionError as err:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot cancel execution job with status '{job.status}'. Only active jobs (queued, preparing, running) can be cancelled.",
+                detail=f"Cannot cancel execution job with status '{job.status}'. {err}",
             )
 
         now = datetime.now(timezone.utc)
-        job.status = "cancelled"
-        job.completed_at = now
-        job.current_stage = "cancelled"
-        job.error_message = reason or "Execution cancelled by user."
-
         # Reset assigned Docker Agent status to online
         if job.agent_id:
             stmt_agent = select(Agent).where(Agent.id == job.agent_id)
@@ -451,6 +526,7 @@ class ExecutionService:
         """
         Updates live metrics and status for a MigrationJob from Docker Agent progress payload.
         Ensures the updating agent is the one assigned to the job.
+        Transitions state through ExecutionStateMachine.
         """
         stmt = select(MigrationJob).where(MigrationJob.id == job_id)
         if agent_id:
@@ -468,13 +544,68 @@ class ExecutionService:
         if job.status == "cancelled":
             return job
 
-        now = datetime.now(timezone.utc)
-        if update.status == "running" and job.started_at is None:
-            job.started_at = now
-        elif update.status in ["completed", "failed", "dry_run_completed"]:
-            job.completed_at = now
+        # Synchronize run identity if provided by agent
+        if update.agent_run_id and job.current_run_id != update.agent_run_id:
+            job.current_run_id = update.agent_run_id
 
-        job.status = update.status
+        # Normalize and transition through state machine if state has changed
+        norm_target_state = ExecutionStateMachine.normalize_state(update.status)
+        norm_curr_state = ExecutionStateMachine.normalize_state(job.status)
+
+        if norm_target_state != norm_curr_state:
+            # If agent directly reports RUNNING or COMPLETED from QUEUED, advance through intermediate states
+            if norm_curr_state == ExecutionLifecycle.QUEUED and norm_target_state in (
+                ExecutionLifecycle.RUNNING,
+                ExecutionLifecycle.COMPLETED,
+            ):
+                await ExecutionStateMachine.transition_job(
+                    session=session,
+                    job=job,
+                    target_state=ExecutionLifecycle.PREPARING,
+                    actor_type="agent",
+                    actor_id=str(agent_id or job.agent_id or "agent"),
+                    reason="Auto-advance on progress update",
+                )
+                norm_curr_state = ExecutionLifecycle.PREPARING
+
+            if norm_curr_state in (
+                ExecutionLifecycle.CLAIMED,
+                ExecutionLifecycle.PREPARING,
+            ) and norm_target_state == ExecutionLifecycle.COMPLETED:
+                await ExecutionStateMachine.transition_job(
+                    session=session,
+                    job=job,
+                    target_state=ExecutionLifecycle.RUNNING,
+                    actor_type="agent",
+                    actor_id=str(agent_id or job.agent_id or "agent"),
+                    reason="Auto-advance to running before completion",
+                )
+                norm_curr_state = ExecutionLifecycle.RUNNING
+
+            try:
+                await ExecutionStateMachine.transition_job(
+                    session=session,
+                    job=job,
+                    target_state=norm_target_state,
+                    actor_type="agent",
+                    actor_id=str(agent_id or job.agent_id or "agent"),
+                    reason=update.error_message,
+                    payload_extra={
+                        "progress": update.progress,
+                        "processed_rows": update.processed_rows,
+                        "successful_rows": update.successful_rows,
+                        "failed_rows": update.failed_rows,
+                        "current_table": update.current_table,
+                        "current_stage": update.current_stage,
+                    },
+                )
+            except InvalidStateTransitionError as err:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=str(err),
+                )
+
+        now = datetime.now(timezone.utc)
         job.progress = update.progress
         if update.total_rows > 0:
             job.total_rows = update.total_rows
@@ -490,8 +621,12 @@ class ExecutionService:
             job.current_stage = update.current_stage
         if update.error_message:
             job.error_message = update.error_message
-        elif update.status in ["completed", "dry_run_completed"]:
+        elif norm_target_state == ExecutionLifecycle.COMPLETED:
             job.error_message = None
+
+        # Preserve explicit dry_run_completed status
+        if update.status == "dry_run_completed" or (job.is_dry_run and norm_target_state == ExecutionLifecycle.COMPLETED):
+            job.status = "dry_run_completed"
 
         # Refresh agent last_seen_at, status, and idle_since to prevent heartbeat starvation during ETL execution
         if job.agent_id:
@@ -500,13 +635,13 @@ class ExecutionService:
             agent_obj = res_agent.scalar_one_or_none()
             if agent_obj:
                 agent_obj.last_seen_at = now
-                if update.status == "running":
+                if norm_target_state == ExecutionLifecycle.RUNNING:
                     agent_obj.status = "busy"
                     agent_obj.idle_since = None   # Actively running — clear idle marker
-                elif update.status in ["completed", "dry_run_completed"]:
+                elif norm_target_state == ExecutionLifecycle.COMPLETED:
                     agent_obj.status = "online"
                     agent_obj.idle_since = now    # Job done — start idle tracking for Option C/A
-                elif update.status == "failed":
+                elif norm_target_state == ExecutionLifecycle.FAILED:
                     agent_obj.status = "error"
                     agent_obj.last_error = f"Migration job '{job.id}' failed: {update.error_message or 'Fatal execution failure.'}"
                     agent_obj.error_category = "JOB_EXECUTION_FAILURE"
@@ -745,6 +880,36 @@ class ExecutionService:
         await session.commit()
         await session.refresh(job)
         return job
+
+    @staticmethod
+    async def list_runs_for_job(
+        session: AsyncSession, job_id: uuid.UUID, user_id: uuid.UUID
+    ) -> List[AgentRun]:
+        """Fetch all AgentRun attempts for a MigrationJob owned by the user."""
+        stmt = (
+            select(AgentRun)
+            .join(MigrationJob, AgentRun.migration_job_id == MigrationJob.id)
+            .join(MigrationPlan, MigrationJob.migration_plan_id == MigrationPlan.id)
+            .where(AgentRun.migration_job_id == job_id, MigrationPlan.user_id == user_id)
+            .order_by(AgentRun.created_at.asc())
+        )
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    @staticmethod
+    async def list_events_for_job(
+        session: AsyncSession, job_id: uuid.UUID, user_id: uuid.UUID
+    ) -> List[ExecutionEvent]:
+        """Fetch all append-only ExecutionEvents for a MigrationJob owned by the user."""
+        stmt = (
+            select(ExecutionEvent)
+            .join(MigrationJob, ExecutionEvent.migration_job_id == MigrationJob.id)
+            .join(MigrationPlan, MigrationJob.migration_plan_id == MigrationPlan.id)
+            .where(ExecutionEvent.migration_job_id == job_id, MigrationPlan.user_id == user_id)
+            .order_by(ExecutionEvent.timestamp.asc())
+        )
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
 
 
 async def _run_diagnosis_background(job_id: uuid.UUID):

@@ -1,5 +1,5 @@
 """
-Execution Domain Database Models (Jobs and Diagnostic Errors)
+Execution Domain Database Models (Jobs, Diagnostic Errors, Agent Runs, and Execution Events)
 """
 
 import uuid
@@ -35,9 +35,20 @@ class MigrationJob(Base):
         index=True,
         nullable=True,
     )
+    current_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+        index=True,
+    )
+    idempotency_key: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        unique=True,
+        index=True,
+        nullable=True,
+    )
     status: Mapped[str] = mapped_column(
         String(50), default="queued", index=True, nullable=False
-    )  # queued, preparing, running, paused, completed, failed, cancelled, dry_run_completed
+    )  # queued, claimed, preparing, running, paused, recovering, verifying, completed, failed, cancelled
     is_dry_run: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     truncate_target: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     progress: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
@@ -73,6 +84,116 @@ class MigrationJob(Base):
     errors: Mapped[List["MigrationError"]] = relationship(
         "MigrationError", back_populates="job", cascade="all, delete-orphan"
     )
+    runs: Mapped[List["AgentRun"]] = relationship(
+        "AgentRun", back_populates="job", cascade="all, delete-orphan", order_by="AgentRun.created_at"
+    )
+    events: Mapped[List["ExecutionEvent"]] = relationship(
+        "ExecutionEvent", back_populates="job", cascade="all, delete-orphan", order_by="ExecutionEvent.timestamp"
+    )
+
+
+class AgentRun(Base):
+    """
+    First-class execution/run identity.
+    A single MigrationJob may have multiple AgentRuns due to crashes, restarts,
+    recovery attempts, or agent reassignments.
+    """
+    __tablename__ = "agent_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    migration_job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("migration_jobs.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agents.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), default="preparing", index=True, nullable=False
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    failure_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    agent_version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    execution_engine_version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    # Relationships
+    job: Mapped["MigrationJob"] = relationship("MigrationJob", back_populates="runs")
+    agent: Mapped[Optional["Agent"]] = relationship("Agent", back_populates="agent_runs")
+    events: Mapped[List["ExecutionEvent"]] = relationship(
+        "ExecutionEvent", back_populates="agent_run"
+    )
+
+
+class ExecutionEvent(Base):
+    """
+    Durable append-only audit trail and event stream for migration execution.
+    The operational state tables remain authoritative; events provide historical tracing and debugging.
+    """
+    __tablename__ = "execution_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    event_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), default=uuid.uuid4, unique=True, index=True, nullable=False
+    )
+    agent_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_runs.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    migration_job_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("migration_jobs.id", ondelete="CASCADE"),
+        index=True,
+        nullable=True,
+    )
+    migration_plan_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("migration_plans.id", ondelete="CASCADE"),
+        index=True,
+        nullable=True,
+    )
+    event_type: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    actor_type: Mapped[str] = mapped_column(String(50), default="system", nullable=False)
+    actor_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        index=True,
+        nullable=False,
+    )
+    payload: Mapped[Dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+    # Relationships
+    job: Mapped[Optional["MigrationJob"]] = relationship("MigrationJob", back_populates="events")
+    agent_run: Mapped[Optional["AgentRun"]] = relationship("AgentRun", back_populates="events")
+    plan: Mapped[Optional["MigrationPlan"]] = relationship("MigrationPlan")
 
 
 class MigrationError(Base):

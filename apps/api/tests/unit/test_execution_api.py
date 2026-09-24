@@ -9,15 +9,31 @@ from app.main import app
 
 @pytest.mark.asyncio
 async def test_execution_api_lifecycle():
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        # 1. Test polling tasks endpoint with agent token header (unregistered token returns 401/404)
-        agent_headers = {"X-Agent-Token": "test_agent_raw_token"}
-        resp_tasks = await client.get("/api/v1/agents/tasks", headers=agent_headers)
-        assert resp_tasks.status_code in [401, 404]
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from app.core.db import Base, get_db
 
-        # 2. Test execution listing endpoint without auth (returns 401)
-        resp_list = await client.get("/api/v1/executions")
-        assert resp_list.status_code == 401
+    test_engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    TestSession = async_sessionmaker(bind=test_engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def override_get_db():
+        async with TestSession() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            # 1. Test polling tasks endpoint with agent token header (unregistered token returns 401/404)
+            agent_headers = {"X-Agent-Token": "test_agent_raw_token"}
+            resp_tasks = await client.get("/api/v1/agents/tasks", headers=agent_headers)
+            assert resp_tasks.status_code in [401, 404]
+
+            # 2. Test execution listing endpoint without auth (returns 401)
+            resp_list = await client.get("/api/v1/executions")
+            assert resp_list.status_code == 401
+    finally:
+        app.dependency_overrides.pop(get_db, None)
 
 
 def test_truncate_target_schema_and_task_serialization():

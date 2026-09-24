@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = next((p for p in Path(__file__).resolve().parents if (p / "apps" / "agent").is_dir()), Path(__file__).resolve().parents[3])
 AGENT_DIR = REPO_ROOT / "apps" / "agent"
 if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))

@@ -2,17 +2,19 @@
 Execution Domain REST API Routes
 """
 
-from typing import List
+from typing import List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
 from app.modules.agents.agents_dependencies import get_current_agent
 from app.modules.agents.agents_models import Agent
 from app.modules.execution.execution_schemas import (
+    AgentRunResponse,
     AgentTaskItemResponse,
     ExecutionCancelRequest,
+    ExecutionEventResponse,
     ExecutionJobResponse,
     ExecutionProgressUpdate,
     ExecutionStartRequest,
@@ -33,19 +35,23 @@ execution_router = APIRouter(tags=["Execution"])
 async def start_plan_execution(
     plan_id: UUID,
     body: ExecutionStartRequest = ExecutionStartRequest(),
+    idempotency_key_header: Optional[str] = Header(None, alias="Idempotency-Key"),
     current_user: User = Depends(get_current_active_user),
     session: AsyncSession = Depends(get_db),
 ):
     """
     Triggers local migration execution for the specified plan ID.
     Queues a MigrationJob record and notifies the assigned Docker Agent.
+    Supports idempotency via Idempotency-Key header or request body.
     """
+    effective_idempotency_key = idempotency_key_header or body.idempotency_key
     return await ExecutionService.create_execution_job(
         session=session,
         user_id=current_user.id,
         plan_id=plan_id,
         is_dry_run=body.is_dry_run,
         truncate_target=body.truncate_target,
+        idempotency_key=effective_idempotency_key,
     )
 
 
@@ -104,6 +110,38 @@ async def get_execution_details(
 
 
 @execution_router.get(
+    "/executions/{id}/runs",
+    response_model=List[AgentRunResponse],
+    summary="List all agent execution runs for a migration job",
+)
+async def list_job_runs(
+    id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """Returns all execution attempts (AgentRuns) for a specific migration job."""
+    return await ExecutionService.list_runs_for_job(
+        session=session, job_id=id, user_id=current_user.id
+    )
+
+
+@execution_router.get(
+    "/executions/{id}/events",
+    response_model=List[ExecutionEventResponse],
+    summary="List append-only audit event history for a migration job",
+)
+async def list_job_events(
+    id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """Returns durable audit event history for a specific migration job."""
+    return await ExecutionService.list_events_for_job(
+        session=session, job_id=id, user_id=current_user.id
+    )
+
+
+@execution_router.get(
     "/agents/tasks",
     response_model=List[AgentTaskItemResponse],
     summary="Poll for pending tasks (Docker Agent authentication required)",
@@ -123,6 +161,7 @@ async def poll_agent_tasks(
         AgentTaskItemResponse(
             job_id=job.id,
             migration_plan_id=job.migration_plan_id,
+            agent_run_id=job.current_run_id,
             status=job.status,
             is_dry_run=job.is_dry_run,
             truncate_target=job.truncate_target,

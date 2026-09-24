@@ -1129,3 +1129,65 @@ sequenceDiagram
 - **[MODIFIED]**: [`apps/agent/engine/ddl_executor.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/ddl_executor.py) — Added `"duplicate key name"`, `"duplicate key"`, and `"1061"` to `benign_keywords`.
 - **[MODIFIED]**: [`apps/api/tests/unit/test_bug_fix11_ddl_and_sql_correctness.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_bug_fix11_ddl_and_sql_correctness.py) — Added unit test assertion validating MySQL error 1061 does not raise RuntimeError.
 
+---
+
+# Execution Flow — Phase 1: Control-Plane State Machine, Run Identity & Event History
+
+## 1. Entry Point
+- **Files**:
+  - [`apps/api/app/modules/execution/execution_routes.py:L40`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py#L40) (`POST /api/v1/plans/{plan_id}/execute`)
+  - [`apps/api/app/modules/execution/execution_routes.py:L114`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py#L114) (`GET /api/v1/agents/tasks`)
+  - [`apps/api/app/modules/execution/execution_routes.py:L149`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py#L149) (`POST /api/v1/execution/jobs/{job_id}/progress`)
+  - [`apps/api/app/modules/execution/execution_routes.py:L186`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py#L186) (`POST /api/v1/execution/jobs/{job_id}/cancel`)
+- **Triggers**:
+  - User submits plan execution with optional `Idempotency-Key` header or body.
+  - Agent polls for pending tasks.
+  - Agent reports execution progress or errors.
+  - User cancels in-flight execution.
+
+## 2. Step-by-Step Execution Sequence
+
+### Step 1: Idempotent Execution Job Creation & Event Stamping
+1. **Request Intake**: `start_plan_execution()` extracts `idempotency_key` from header or body (`ExecutionStartRequest`).
+2. **Idempotency Guard**: `ExecutionService.create_execution_job()` checks for existing `MigrationJob` with the specified `idempotency_key`. If matched, returns the existing job directly without queuing duplicates.
+3. **Active Job Concurrency Guard**: Rejects duplicate execution if an active job (`QUEUED`, `CLAIMED`, `PREPARING`, `RUNNING`) already exists for the plan.
+4. **Job Persistence & Event Emission**:
+   - Persists `MigrationJob` with `status="queued"` and `idempotency_key`.
+   - `ExecutionStateMachine` writes append-only `ExecutionEvent` (`event_type="JOB_CREATED"`).
+
+### Step 2: Agent Task Claiming & Run Identity Provisioning
+1. **Agent Poll**: Docker Agent polls `GET /api/v1/agents/tasks`.
+2. **Atomic Task Claim**: `ExecutionService.get_pending_tasks_for_agent()` locks the pending job with `FOR UPDATE SKIP LOCKED`.
+3. **Agent Run Creation**:
+   - `ExecutionStateMachine.create_agent_run()` generates a distinct `agent_run_id` in `agent_runs`.
+   - Links `job.current_run_id = run.id`.
+   - Emits `JOB_CLAIMED` and `JOB_STARTED` execution events.
+4. **Task Dispatch**: Returns task payload containing `agent_run_id` along with plan details to the Docker agent.
+
+### Step 3: Progress Synchronization & State Enforcement
+1. **Agent Progress Reporting**: Agent sends `POST /api/v1/execution/jobs/{job_id}/progress` with `agent_run_id`, row counts, and status.
+2. **State Transition Validation**:
+   - `ExecutionStateMachine.validate_transition(from_state, to_state)` verifies transition legality against `LEGAL_TRANSITIONS`.
+   - Invalid jumps (e.g. `COMPLETED -> RUNNING`) raise `InvalidStateTransitionError` (yielding HTTP 409 Conflict).
+   - Auto-advances intermediate states (e.g., `QUEUED -> PREPARING -> RUNNING -> COMPLETED`) for resilient progress reporting.
+   - Synchronizes `agent_runs.status` and `agent_runs.finished_at` when terminal status is reached.
+3. **Audit Event Logging**: Emits corresponding event (`STEP_STARTED`, `STEP_COMPLETED`, `JOB_COMPLETED`, `JOB_FAILED`) in `execution_events`.
+
+### Step 4: Stale Recovery & Multi-Run Resumption
+1. **Watchdog Detection**: If an agent stops responding, `check_stale_jobs()` identifies stale jobs.
+2. **Run Marking**: Marks previous `AgentRun` as `FAILED` with `failure_reason="Agent heartbeat timed out"`.
+3. **Job Reassignment / Recovery**: Next execution attempt or recovery generates a fresh `AgentRun` (`agent_run_id`), preserving historical runs for audit and comparison.
+
+## 3. Impact & Delta Analysis
+- **[NEW]**: [`apps/api/app/core/state.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/core/state.py) — Centralized `AgentLifecycle`, `MigrationPlanLifecycle`, `ExecutionLifecycle`, `ExecutionStepLifecycle`, and `ExecutionEventType` enums.
+- **[NEW]**: [`apps/api/app/modules/execution/execution_state_machine.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_state_machine.py) — `ExecutionStateMachine` service validating transitions, provisioning `AgentRun`, and appending `ExecutionEvent`.
+- **[NEW]**: [`apps/api/alembic/versions/013_add_agent_runs_and_execution_events.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/alembic/versions/013_add_agent_runs_and_execution_events.py) — Linear database migration for `agent_runs`, `execution_events`, `current_run_id`, and `idempotency_key`.
+- **[NEW]**: [`apps/api/tests/unit/test_phase1_state_machine_and_events.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_phase1_state_machine_and_events.py) — Full unit test suite for transitions, events, idempotency, runs, cancellations, and recovery.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_models.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_models.py) — Added `AgentRun` and `ExecutionEvent` ORM models, plus `current_run_id` and `idempotency_key` fields on `MigrationJob`.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_models.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_models.py) — Added `agent_runs` relationship on `Agent`.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_schemas.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_schemas.py) — Added `AgentRunResponse`, `ExecutionEventResponse`, `agent_run_id`, and `idempotency_key`.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py) — Integrated state machine transitions, run provisioning, idempotency checks, and event listings.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py) — Exposed runs and events endpoints, and handled `Idempotency-Key` headers.
+- **[UNCHANGED]**: `apps/agent/engine/orchestrator.py`, `checkpoint.py`, `target_writer.py`, `ast_transformer.py`, DuckDB staging, and database connectors.
+
+

@@ -2040,3 +2040,39 @@ Added `"duplicate key name"`, `"duplicate key"`, and `"1061"` to the `benign_key
 ### 4. Trade-offs & Future Considerations
 - Target database pre-checks can also introspect existing indexes before submitting DDL statements, reducing the need for exception-based flow control.
 
+---
+
+## [2026-09-24] - Phase 1: Formalize Runtime State, Run Identity and Durable Event History
+
+### 1. Decision Summary
+Established a durable control-plane state machine around the existing execution system without modifying deterministic ETL behavior. Introduced:
+1. Centralized explicit state enums (`AgentLifecycle`, `MigrationPlanLifecycle`, `ExecutionLifecycle`, `ExecutionStepLifecycle`, `ExecutionEventType`) with `NormalizedStrEnum`.
+2. First-class run identity `agent_run_id` backed by the `agent_runs` table (`AgentRun` model) to track execution attempts separately from migration jobs and plans.
+3. Durable append-only event history backed by `execution_events` (`ExecutionEvent` model) with UUID event IDs and structured JSON payloads.
+4. Centralized state machine service `ExecutionStateMachine` enforcing valid state transitions with domain-specific `InvalidStateTransitionError` and emitting audit events.
+5. Idempotent job creation via `idempotency_key` with unique database constraint `uq_migration_jobs_idempotency_key` and HTTP header/body support.
+6. Alembic migration `013_add_agent_runs_and_execution_events.py` maintaining linear schema migration history.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Execution state strings (`"queued"`, `"running"`, `"completed"`, etc.) were scattered across routes, services, and tests without a single source of truth or transition enforcement. Job retries or container crashes had no dedicated run identity, causing status collisions. There was no durable append-only event trail for audit and debugging, and repeated job creation requests could accidentally trigger duplicate migrations.
+- **Chosen Solution**:
+  - `apps/api/app/core/state.py`: Centralized state enumerations inheriting from `NormalizedStrEnum` ensuring case-insensitive normalization and string comparison compatibility.
+  - `agent_runs`: Separates the conceptual job (`MigrationJob`) from physical execution attempts (`AgentRun`), enabling multi-run tracking when agents crash, jobs are reassigned, or recovery restarts execution.
+  - `execution_events`: Append-only audit table storing every state transition and lifecycle event (`JOB_CREATED`, `JOB_CLAIMED`, `JOB_STARTED`, etc.) with actor attribution and payload context. Authoritative state remains in tables; events provide durable history.
+  - `ExecutionStateMachine`: Enforces legal transition graphs, preventing invalid jumps (e.g. `COMPLETED -> RUNNING`), auto-advancing intermediate states during agent reporting, and persisting events atomically within the transaction.
+  - `idempotency_key`: Prevents accidental duplicate execution jobs on network retry by returning the existing job.
+- **Why SQLAlchemy + Alembic**: Native async ORM integration, explicit foreign keys with `CASCADE` on job deletion, and reversible linear migrations.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Pure Event Sourcing (No authoritative state columns)**:
+  - _Rejected_: Computing job status exclusively by replaying events adds query latency and risks diverging from active agent heartbeats. Dual model (authoritative columns + append-only events) gives instant indexed lookups and complete audit durability.
+- **Alternative B: Merging Run State directly into `MigrationJob`**:
+  - _Rejected_: Prevents capturing diagnostics from multiple failed or recovered execution attempts on the same job.
+- **Alternative C: Redis-based State Machine**:
+  - _Rejected_: In-memory Redis state lacks transactional consistency with the PostgreSQL database, risking split-brain state if the server restarts.
+
+### 4. Trade-offs & Future Considerations
+- In-memory Task Managers (`RefinementTaskManager`, `GenerationTaskManager`) remain in memory for now and are planned for Phase 2 formalization.
+- Agent run heartbeat liveness is currently linked to `Agent.last_seen_at`; per-run timeout leases can be refined in Phase 2.
+
+
