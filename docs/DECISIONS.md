@@ -2104,7 +2104,50 @@ Converted execution from a coarse `MigrationJob` loop into a durable execution g
   - _Rejected_: Docker containers are ephemeral; destroying or rescheduling a container to a new host wipes the `/tmp` volume, causing migrations to restart from zero.
 
 ### 4. Trade-offs & Future Considerations
-- Autonomous replanning and self-healing LLM auto-corrections during runtime execution are intentionally deferred to Phase 3.
+- Autonomous replanning and self-healing LLM auto-corrections during runtime execution are formalized in Phase 3.
+
+---
+
+## [2026-09-24] - Phase 3: Failure Classification, Recovery Router, ASK_USER State, and Agentic Replanning
+
+### 1. Decision Summary
+Implemented a resilient, deterministic, closed-loop recovery and replanning architecture ensuring the LLM never directly controls low-level execution:
+1. **Centralized Failure Taxonomy (`FailureClassifier` & `ClassifiedFailure`)**:
+   - Centralized enum categories (`TRANSIENT_NETWORK`, `TRANSIENT_DATABASE`, `SOURCE_UNAVAILABLE`, `TARGET_UNAVAILABLE`, `AUTHENTICATION`, `AUTHORIZATION`, `SCHEMA_CHANGED`, `SOURCE_SCHEMA_MISMATCH`, `TARGET_SCHEMA_MISMATCH`, `DATA_VALIDATION`, `CONSTRAINT_VIOLATION`, `TRANSFORMATION_ERROR`, `RESOURCE_EXHAUSTION`, `TIMEOUT`, `AGENT_CRASH`, `AGENT_LOST`, `PLAN_INVALID`, `PLAN_INFEASIBLE`, `USER_CANCELLED`, `UNKNOWN`).
+   - Standardized properties per failure: `category`, `code`, `message`, `retryable`, `recoverable`, `requires_replan`, `requires_user`, `severity`, `domain`, `context`.
+   - Domain separation: LLM infrastructure (`LLM_INFRASTRUCTURE`) $\ne$ LLM output validation (`LLM_OUTPUT_VALIDATION`) $\ne$ Database engine (`DATABASE_ENGINE`) $\ne$ Migration execution (`MIGRATION_EXECUTION`) $\ne$ Security (`SECURITY_AUTH`).
+2. **Deterministic Recovery Router (`RecoveryRouter`)**:
+   - Computes single authoritative outcome: `RETRY`, `RECOVER`, `REPLAN`, `ASK_USER`, or `FAIL`.
+   - Hard circuit breaker loop bounds: `MAX_RETRIES_PER_STEP=3`, `MAX_RECOVERIES_PER_STEP=2`, `MAX_REPLANS_PER_JOB=3`, `MAX_LLM_CALLS=5`, `MAX_TOTAL_RETRY_DURATION_SECONDS=300s`.
+   - Safety guard: Destructive operations (e.g. `DROP`, `TRUNCATE`, `CASCADE`) and schema ambiguities are never retried blindly; they route directly to `ASK_USER`.
+3. **Explicit Human-in-the-Loop Intervention (`ASK_USER` State & `UserIntervention`)**:
+   - Added `ExecutionLifecycle.ASK_USER` and `ExecutionStepLifecycle.ASK_USER` states.
+   - Introduced `UserIntervention` model with options payload and resolution tracking (`retry`, `replan`, `fail`, `skip_step`).
+   - Exposed REST endpoints: `GET /executions/{id}/interventions` and `POST /executions/{id}/interventions/{intervention_id}/respond`.
+4. **Sanitized Agentic Replanning (`AgenticReplanService`)**:
+   - Connects execution failures back to LangGraph refinement pipeline.
+   - Security rule: Zero raw database credentials and zero unmasked row data sent to LLM (regex sanitization replaces secrets with `***REDACTED***`).
+5. **Approval Invalidation Governance**:
+   - Re-planning or modifying the migration structure immediately revokes previous approval, resets plan status to `awaiting_approval`, and clears `approved_version_number`, `approved_by_user_id`, and `approved_at`.
+   - Enforces re-approval before new execution jobs can commence.
+6. **Linear Database Migration**: Created Alembic revision `015_add_failure_classification_interventions_and_governance.py` (`f3a4b5c6d7e8`).
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Raw error strings from Postgres, MongoDB, or Docker were handled ad-hoc or passed unparsed. LLMs should not directly run low-level database retries or restart containers. Re-planning without approval invalidation risked executing unverified DDL.
+- **Chosen Solution**:
+  - Deterministic-first recovery router gives predictable backoff and failover.
+  - LLM is restricted to AST refinement at the planning layer with sanitized context.
+  - Structural replans force explicit human re-approval for safe governance.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Letting LLM choose retry/recover/replan actions dynamically**:
+  - _Rejected_: LLMs hallucinate recovery actions, miss backoff timers, and can trigger infinite loops or destructive data wipes.
+- **Alternative B: Retaining approvals across replans**:
+  - _Rejected_: If AI modifies column casts or creates new target tables, executing without fresh human review violates database safety and compliance rules.
+
+### 4. Trade-offs & Future Considerations
+- Phase 4 will introduce live CDC streaming, target validation metrics, and performance optimizations.
+
 
 
 

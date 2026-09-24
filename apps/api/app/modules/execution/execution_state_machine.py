@@ -43,12 +43,14 @@ class ExecutionStateMachine:
         ExecutionLifecycle.PREPARING: {
             ExecutionLifecycle.RUNNING,
             ExecutionLifecycle.VERIFYING,
+            ExecutionLifecycle.ASK_USER,
             ExecutionLifecycle.CANCELLED,
             ExecutionLifecycle.FAILED,
         },
         ExecutionLifecycle.RUNNING: {
             ExecutionLifecycle.PAUSED,
             ExecutionLifecycle.RECOVERING,
+            ExecutionLifecycle.ASK_USER,
             ExecutionLifecycle.VERIFYING,
             ExecutionLifecycle.COMPLETED,
             ExecutionLifecycle.FAILED,
@@ -56,23 +58,34 @@ class ExecutionStateMachine:
         },
         ExecutionLifecycle.PAUSED: {
             ExecutionLifecycle.RUNNING,
+            ExecutionLifecycle.ASK_USER,
             ExecutionLifecycle.CANCELLED,
             ExecutionLifecycle.FAILED,
         },
         ExecutionLifecycle.RECOVERING: {
             ExecutionLifecycle.RUNNING,
+            ExecutionLifecycle.ASK_USER,
+            ExecutionLifecycle.FAILED,
+            ExecutionLifecycle.CANCELLED,
+        },
+        ExecutionLifecycle.ASK_USER: {
+            ExecutionLifecycle.PREPARING,
+            ExecutionLifecycle.RUNNING,
+            ExecutionLifecycle.RECOVERING,
             ExecutionLifecycle.FAILED,
             ExecutionLifecycle.CANCELLED,
         },
         ExecutionLifecycle.VERIFYING: {
             ExecutionLifecycle.COMPLETED,
             ExecutionLifecycle.FAILED,
+            ExecutionLifecycle.ASK_USER,
             ExecutionLifecycle.RECOVERING,
             ExecutionLifecycle.CANCELLED,
         },
         ExecutionLifecycle.COMPLETED: set(),  # Terminal state
         ExecutionLifecycle.FAILED: {
             ExecutionLifecycle.RECOVERING,   # Recovery/retry can resurrect failed jobs into recovering
+            ExecutionLifecycle.ASK_USER,
         },
         ExecutionLifecycle.CANCELLED: set(),  # Terminal state
     }
@@ -135,11 +148,15 @@ class ExecutionStateMachine:
         elif to_state == ExecutionLifecycle.RUNNING:
             if from_state == ExecutionLifecycle.PAUSED:
                 return ExecutionEventType.JOB_RESUMED
+            if from_state == ExecutionLifecycle.ASK_USER:
+                return ExecutionEventType.USER_INTERVENTION_RESOLVED
             return ExecutionEventType.JOB_STARTED
         elif to_state == ExecutionLifecycle.PAUSED:
             return ExecutionEventType.JOB_PAUSED
         elif to_state == ExecutionLifecycle.RECOVERING:
             return ExecutionEventType.RECOVERY_STARTED
+        elif to_state == ExecutionLifecycle.ASK_USER:
+            return ExecutionEventType.USER_INTERVENTION_REQUESTED
         elif to_state == ExecutionLifecycle.VERIFYING:
             return ExecutionEventType.VERIFICATION_STARTED
         elif to_state == ExecutionLifecycle.COMPLETED:

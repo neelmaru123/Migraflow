@@ -15,6 +15,7 @@ JSON_TYPE = JSONB().with_variant(JSON, "sqlite")
 if TYPE_CHECKING:
     from app.modules.migration_plans.migration_plans_models import MigrationPlan
     from app.modules.agents.agents_models import Agent
+    from app.modules.users.users_models import User
 
 
 class MigrationJob(Base):
@@ -48,7 +49,7 @@ class MigrationJob(Base):
     )
     status: Mapped[str] = mapped_column(
         String(50), default="queued", index=True, nullable=False
-    )  # queued, claimed, preparing, running, paused, recovering, verifying, completed, failed, cancelled
+    )  # queued, claimed, preparing, running, paused, recovering, ask_user, verifying, completed, failed, cancelled
     is_dry_run: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     truncate_target: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     progress: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
@@ -92,6 +93,9 @@ class MigrationJob(Base):
     )
     events: Mapped[List["ExecutionEvent"]] = relationship(
         "ExecutionEvent", back_populates="job", cascade="all, delete-orphan", order_by="ExecutionEvent.timestamp"
+    )
+    interventions: Mapped[List["UserIntervention"]] = relationship(
+        "UserIntervention", back_populates="job", cascade="all, delete-orphan", order_by="UserIntervention.created_at"
     )
 
 
@@ -187,6 +191,12 @@ class MigrationExecutionPlan(Base):
     concurrency_limit: Mapped[int] = mapped_column(
         Integer, default=2, nullable=False
     )
+    replan_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    recovery_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -237,12 +247,24 @@ class MigrationExecutionStep(Base):
     )
     status: Mapped[str] = mapped_column(
         String(50), default="pending", index=True, nullable=False
-    )  # pending, running, retrying, completed, failed, skipped, cancelled
+    )  # pending, running, retrying, ask_user, completed, failed, skipped, cancelled
     attempt_count: Mapped[int] = mapped_column(
         Integer, default=0, nullable=False
     )
     max_attempts: Mapped[int] = mapped_column(
         Integer, default=3, nullable=False
+    )
+    replan_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    recovery_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    failure_category: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )
+    failure_code: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
     )
     started_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -293,6 +315,9 @@ class MigrationExecutionStep(Base):
     )
     checkpoints: Mapped[List["ExecutionCheckpoint"]] = relationship(
         "ExecutionCheckpoint", back_populates="step", cascade="all, delete-orphan"
+    )
+    interventions: Mapped[List["UserIntervention"]] = relationship(
+        "UserIntervention", back_populates="step", cascade="all, delete-orphan"
     )
 
 
@@ -440,3 +465,75 @@ class MigrationError(Base):
 
     # Relationships
     job: Mapped["MigrationJob"] = relationship("MigrationJob", back_populates="errors")
+
+
+class UserIntervention(Base):
+    """
+    Durable record for human-in-the-loop (ASK_USER) intervention requests.
+    Used when the system encounters safety-critical ambiguity, schema conflicts,
+    destructive confirmations, or unrecoverable authentication errors.
+    """
+    __tablename__ = "user_interventions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    migration_job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("migration_jobs.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    step_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("migration_execution_steps.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    failure_category: Mapped[str] = mapped_column(
+        String(100), nullable=False
+    )
+    failure_code: Mapped[str] = mapped_column(
+        String(100), nullable=False
+    )
+    question: Mapped[str] = mapped_column(
+        String, nullable=False
+    )
+    suggested_action: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )
+    options: Mapped[Any] = mapped_column(
+        JSON_TYPE, nullable=False
+    )
+    context_data: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSON_TYPE, nullable=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), default="pending", index=True, nullable=False
+    )  # pending, resolved, dismissed
+    user_response: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSON_TYPE, nullable=True
+    )
+    resolved_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    # Relationships
+    job: Mapped["MigrationJob"] = relationship("MigrationJob", back_populates="interventions")
+    step: Mapped[Optional["MigrationExecutionStep"]] = relationship(
+        "MigrationExecutionStep", back_populates="interventions"
+    )
+    resolved_by: Mapped[Optional["User"]] = relationship(
+        "User", foreign_keys=[resolved_by_user_id]
+    )
+

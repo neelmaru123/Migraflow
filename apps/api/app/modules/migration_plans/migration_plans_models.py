@@ -5,7 +5,7 @@ Migration Plans Domain Database Models
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, List, Optional
-from sqlalchemy import DateTime, Float, ForeignKey, JSON, String, desc
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, desc
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.db import Base
@@ -63,6 +63,15 @@ class MigrationPlan(Base):
     is_valid: Mapped[Optional[bool]] = mapped_column(nullable=True, default=True)
     validation_errors: Mapped[Optional[Any]] = mapped_column(JSON_TYPE, nullable=True)
     langgraph_thread_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    approved_version_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    approved_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    approved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -76,7 +85,8 @@ class MigrationPlan(Base):
     )
 
     # Relationships
-    user: Mapped["User"] = relationship("User", back_populates="migration_plans")
+    user: Mapped["User"] = relationship("User", back_populates="migration_plans", foreign_keys="[MigrationPlan.user_id]")
+    approved_by: Mapped[Optional["User"]] = relationship("User", foreign_keys="[MigrationPlan.approved_by_user_id]")
     agent: Mapped[Optional["Agent"]] = relationship("Agent", back_populates="migration_plans")
     snapshots: Mapped[List["MetadataSnapshot"]] = relationship(
         "MetadataSnapshot", secondary="migration_plan_snapshots", back_populates="migration_plans"
@@ -112,6 +122,15 @@ class MigrationPlanVersion(Base):
     is_valid: Mapped[Optional[bool]] = mapped_column(nullable=True, default=True)
     confidence_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     validation_errors: Mapped[Optional[Any]] = mapped_column(JSON_TYPE, nullable=True)
+    is_approved: Mapped[Optional[bool]] = mapped_column(Boolean, default=False, nullable=True)
+    approved_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    approved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),
@@ -120,4 +139,5 @@ class MigrationPlanVersion(Base):
 
     # Relationships
     plan: Mapped["MigrationPlan"] = relationship("MigrationPlan", back_populates="versions")
+
 

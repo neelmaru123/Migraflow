@@ -110,6 +110,10 @@ class ExecutionStepResponse(BaseModel):
     status: str
     attempt_count: int
     max_attempts: int
+    replan_count: int = 0
+    recovery_count: int = 0
+    failure_category: Optional[str] = None
+    failure_code: Optional[str] = None
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     agent_run_id: Optional[UUID] = None
@@ -132,9 +136,37 @@ class ExecutionPlanResponse(BaseModel):
     migration_plan_version_id: Optional[UUID] = None
     status: str
     concurrency_limit: int
+    replan_count: int = 0
+    recovery_count: int = 0
     steps: List[ExecutionStepResponse] = Field(default_factory=list)
     created_at: datetime
     finalized_at: Optional[datetime] = None
+
+
+class UserInterventionResponse(BaseModel):
+    """Response model for an explicit ASK_USER intervention request."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    migration_job_id: UUID
+    step_id: Optional[UUID] = None
+    failure_category: str
+    failure_code: str
+    question: str
+    suggested_action: Optional[str] = None
+    options: List[Dict[str, Any]] = Field(default_factory=list)
+    context_data: Optional[Dict[str, Any]] = None
+    status: str
+    user_response: Optional[Dict[str, Any]] = None
+    resolved_by_user_id: Optional[UUID] = None
+    resolved_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class UserInterventionRespondRequest(BaseModel):
+    """Payload submitted by user when answering an ASK_USER intervention."""
+    action: str  # retry, recover, replan, fail, truncate_and_proceed, manual_edit
+    response_data: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ExecutionStepClaimRequest(BaseModel):

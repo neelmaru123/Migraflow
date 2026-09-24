@@ -363,9 +363,9 @@ async def approve_migration_plan(
     if plan.user_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You do not have permission to approve this migration plan.",
+            detail="Access forbidden: You do not own this migration plan.",
         )
-    approved = await MigrationPlanService.approve_plan(session, plan)
+    approved = await MigrationPlanService.approve_plan(session, plan, user=current_user)
     return _to_plan_detail_response(approved)
 
 

@@ -1,12 +1,14 @@
 """
 Retry Policy Foundation
 Provides a reusable retry policy abstraction for durable execution steps and jobs.
-Supports max attempts, exponential backoff, jitter, and classification of retryable vs non-retryable errors.
+Supports max attempts, exponential backoff, jitter, duration bounds, and classification of retryable vs non-retryable errors.
 """
 
 import math
 import random
 from typing import Any, Dict, Optional, Set, Union
+
+from app.core.state import FailureCategory
 
 
 class RetryPolicy:
@@ -20,6 +22,7 @@ class RetryPolicy:
         initial_delay: float = 1.0,
         backoff_factor: float = 2.0,
         max_delay: float = 60.0,
+        max_total_retry_duration: float = 300.0,
         jitter: bool = True,
         retryable_error_types: Optional[Set[str]] = None,
         non_retryable_error_types: Optional[Set[str]] = None,
@@ -28,7 +31,16 @@ class RetryPolicy:
         self.initial_delay = initial_delay
         self.backoff_factor = backoff_factor
         self.max_delay = max_delay
+        self.max_total_retry_duration = max_total_retry_duration
         self.jitter = jitter
+
+        self.retryable_categories: Set[FailureCategory] = {
+            FailureCategory.TRANSIENT_NETWORK,
+            FailureCategory.TRANSIENT_DATABASE,
+            FailureCategory.TIMEOUT,
+            FailureCategory.SOURCE_UNAVAILABLE,
+            FailureCategory.TARGET_UNAVAILABLE,
+        }
 
         self.retryable_error_types: Set[str] = (
             {t.upper() for t in retryable_error_types}
@@ -44,6 +56,11 @@ class RetryPolicy:
                 "TEMPORARY_UNAVAILABLE",
                 "TRANSIENT_IO_ERROR",
                 "RATE_LIMITED",
+                "ERR_NETWORK_CONNECTION_DROPPED",
+                "ERR_DB_LOCK_CONTENTION",
+                "ERR_OPERATION_TIMEOUT",
+                "ERR_LLM_RATE_LIMIT",
+                "ERR_LLM_SERVICE_UNAVAILABLE",
             }
         )
 
@@ -60,6 +77,9 @@ class RetryPolicy:
                 "DATA_TYPE_MISMATCH",
                 "CONSTRAINT_VIOLATION",
                 "INVALID_PLAN_SPEC",
+                "ERR_DB_AUTHENTICATION_FAILED",
+                "ERR_DB_AUTHORIZATION_DENIED",
+                "ERR_USER_CANCELLED",
             }
         )
 
@@ -73,22 +93,36 @@ class RetryPolicy:
         if norm in self.retryable_error_types:
             return True
         # Check substring matches for common patterns
-        if any(non_ret in norm for non_ret in ["SYNTAX", "AUTH", "PERMISSION", "NOT_FOUND"]):
+        if any(non_ret in norm for non_ret in ["SYNTAX", "AUTH", "PERMISSION", "NOT_FOUND", "CONSTRAINT", "CANCEL"]):
             return False
-        if any(ret in norm for ret in ["TIMEOUT", "CONN", "DEADLOCK", "TEMPORARY", "TRANSIENT"]):
+        if any(ret in norm for ret in ["TIMEOUT", "CONN", "DEADLOCK", "TEMPORARY", "TRANSIENT", "RATE_LIMIT"]):
             return True
         # Default policy: allow retry if not explicitly non-retryable
         return True
+
+    def is_destructive_operation(self, operation: str, step_type: str = "") -> bool:
+        """Determines if an operation is destructive (e.g. truncate, drop table, purge)."""
+        op_norm = operation.strip().lower()
+        step_norm = step_type.strip().lower()
+        destructive_patterns = ["truncate", "drop", "purge", "delete_all", "cascade_drop"]
+        return any(d in op_norm or d in step_norm for d in destructive_patterns)
 
     def should_retry(
         self,
         current_attempt: int,
         error_type: Optional[str] = None,
+        total_retry_duration: float = 0.0,
+        is_destructive: bool = False,
     ) -> bool:
         """
         Determines whether another execution attempt should be scheduled.
+        Guards against max attempts, max retry duration, non-retryable errors, and destructive operations.
         """
         if current_attempt >= self.max_attempts:
+            return False
+        if total_retry_duration >= self.max_total_retry_duration:
+            return False
+        if is_destructive:
             return False
         return self.is_retryable_error(error_type)
 

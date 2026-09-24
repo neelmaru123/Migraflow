@@ -1262,5 +1262,96 @@ sequenceDiagram
 - **[MODIFIED]**: [`apps/agent/engine/checkpoint.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/checkpoint.py) — Added control plane database sync and fallback lookup.
 - **[MODIFIED]**: [`apps/api/tests/unit/test_alembic_migrations.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_alembic_migrations.py) — Updated expected migration revision DAG head to `e2f3a4b5c6d7`.
 
+---
+
+# Execution Flow — Failure Classification, Recovery Router & Agentic Replanning (Phase 3)
+
+## 1. Entry Point
+- **Failure Reporter**: Docker Agent reporting step failure via `POST /api/v1/executions/steps/{step_id}/fail` in [`apps/api/app/modules/execution/execution_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py).
+- **Control-Plane Evaluator**: `ExecutionPlanService.fail_step()` in [`apps/api/app/modules/execution/execution_plan_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_plan_services.py).
+- **Classification Engine**: `FailureClassifier` in [`apps/api/app/modules/execution/failure_taxonomy.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/failure_taxonomy.py).
+- **Decision Engine**: `RecoveryRouter` in [`apps/api/app/modules/execution/recovery_router.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/recovery_router.py).
+- **Agentic Replanner**: `AgenticReplanService` in [`apps/api/app/modules/execution/agentic_replan_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/agentic_replan_services.py).
+- **User Intervention Endpoint**: `POST /api/v1/executions/{id}/interventions/{intervention_id}/respond`.
+
+## 2. Step-by-Step Execution Sequence
+
+```
+Execution Step Failure
+         ↓
+FailureClassifier.classify_error_payload()
+         ↓
+ClassifiedFailure (category, domain, severity, retryable, recoverable, requires_replan, requires_user)
+         ↓
+RecoveryRouter.evaluate()
+         ↓
+┌─────────────────┬─────────────────┬─────────────────┬─────────────────┬─────────────────┐
+│     RETRY       │    RECOVER      │     REPLAN      │    ASK_USER     │      FAIL       │
+└────────┬────────┴────────┬────────┴────────┬────────┴────────┬────────┴────────┬────────┘
+         │                 │                 │                 │                 │
+         ↓                 ↓                 ↓                 ↓                 ↓
+   Exponential       Reassign Step     Sanitize Error    Create User       Mark Step &
+   Backoff Delay     to Agent B;       Context (No raw   Intervention;     Job as FAILED;
+   (Full Jitter);    Resume from       creds/rows);      Pause Step &      Emit failure
+   Step -> RETRYING  Checkpoint        LangGraph Replan; Job in ASK_USER;  events
+                                       Revoke Approval;  Await Human Res
+                                       Status -> AWAITING
+```
+
+### Step 1: Centralized Error Classification
+1. **Input Parsing**: `FailureClassifier.classify_exception()` or `FailureClassifier.classify_error_payload()` parses raw error strings, SQLSTATE codes, or Python exception hierarchies.
+2. **Domain Segregation**: Assigns specific domain:
+   - `LLM_INFRASTRUCTURE`: 429 rate limit, 503 unavailable, OpenAI/Anthropic/Google timeouts.
+   - `LLM_OUTPUT_VALIDATION`: Invalid plan AST schema, unparseable JSON, structurally infeasible plan.
+   - `DATABASE_ENGINE`: Unique constraint violation (`23505`), Foreign key violation (`23503`), Not-null violation (`23502`).
+   - `MIGRATION_EXECUTION`: Missing tables/columns (`42P01`, `42703`), connection dropped, query timeout.
+   - `SECURITY_AUTH`: Invalid database password, permission/authorization denied (`401`, `403`).
+   - `SYSTEM_ORCHESTRATION`: Agent lost, container crash, heartbeat timeout.
+
+### Step 2: Deterministic Recovery Routing & Hard Bounds
+1. **Operational Limits (Anti-Infinite Loop)**:
+   - Checks `replan_count < 3`, `attempt_count < 3`, `recovery_count < 2`, `llm_call_count < 5`, `total_retry_duration < 300s`.
+   - If any bound is exceeded, immediately terminates loop with `FAIL` or `ASK_USER`.
+2. **Destructive Ambiguity Guard**:
+   - If error occurred during destructive operations (`DROP`, `TRUNCATE`, `CASCADE`), blind retry is blocked and routed to `ASK_USER`.
+3. **Decision Execution**:
+   - `RETRY`: Computes backoff delay with full jitter; step transitions to `retrying`.
+   - `RECOVER`: Marks step as `retrying` and invalidates dead agent run for failover claim.
+   - `REPLAN`: Initiates agentic replanning pipeline.
+   - `ASK_USER`: Persists `UserIntervention` record; step & job transition to `ask_user`.
+   - `FAIL`: Transitions step & job to `failed`.
+
+### Step 3: Agentic Replanning & Approval Invalidation
+1. **Context Sanitization**: `AgenticReplanService.sanitize_error_context()` strips passwords, bearer tokens, connection URIs, and raw table rows, injecting `***REDACTED***`.
+2. **LangGraph Refinement**: Calls `MigrationPlanService.refine_plan()` to generate a new AST version repairing mappings, type casts, or table definitions.
+3. **Approval Revocation**:
+   - Resets `MigrationPlan.status = 'awaiting_approval'`.
+   - Clears `approved_version_number = None`, `approved_by_user_id = None`, `approved_at = None`.
+   - Emits `PLAN_APPROVAL_REVOKED` and `REPLAN_COMPLETED` events.
+   - Blocks new execution until the human user reviews and approves the new plan version.
+
+### Step 4: Human-in-the-Loop Intervention Resolution
+1. **User Notification & Options**: Frontend queries `GET /api/v1/executions/{id}/interventions` to view the required decision and selectable options.
+2. **User Response**: User submits choice via `POST /api/v1/executions/{id}/interventions/{intervention_id}/respond` (`action: "retry" | "replan" | "fail"`).
+3. **Execution Resumption**:
+   - If `retry`: Step transitions from `ask_user` $\to$ `retrying`.
+   - If `replan`: Triggers `AgenticReplanService.replan_execution_failure()`.
+   - If `fail`: Transitions job and step to `failed`.
+   - Emits `USER_INTERVENTION_RESOLVED` event.
+
+## 3. Impact & Delta Analysis
+- **[NEW]**: [`apps/api/app/modules/execution/failure_taxonomy.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/failure_taxonomy.py) — Centralized failure taxonomy, `ClassifiedFailure`, and rule-based `FailureClassifier`.
+- **[NEW]**: [`apps/api/app/modules/execution/recovery_router.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/recovery_router.py) — Deterministic recovery router with anti-infinite loop guards and safety checks.
+- **[NEW]**: [`apps/api/app/modules/execution/agentic_replan_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/agentic_replan_services.py) — Sanitized LangGraph replanning pipeline and approval invalidation engine.
+- **[NEW]**: [`apps/api/alembic/versions/015_add_failure_classification_interventions_and_governance.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/alembic/versions/015_add_failure_classification_interventions_and_governance.py) — Linear database migration adding `user_interventions`, counters, and plan approval governance columns.
+- **[NEW]**: [`apps/api/tests/unit/test_phase3_failure_classification_and_recovery.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_phase3_failure_classification_and_recovery.py) — 7 comprehensive unit tests for taxonomy, router decisions, loop bounds, intervention lifecycle, and approval governance.
+- **[MODIFIED]**: [`apps/api/app/core/state.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/core/state.py) — Added `FailureCategory`, `FailureSeverity`, `FailureDomain`, `RecoveryDecisionType`, `ASK_USER` states, and replan/intervention event constants.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_models.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_models.py) — Added `UserIntervention` model and tracking counters on `MigrationExecutionPlan` and `MigrationExecutionStep`.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_models.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_models.py) — Added approval governance columns and disambiguated foreign keys.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_plan_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_plan_services.py) — Integrated failure classification, recovery routing, and intervention management into step failure handling.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py) — Exposed intervention listing and response endpoints.
+- **[MODIFIED]**: [`apps/api/tests/unit/test_alembic_migrations.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_alembic_migrations.py) — Updated expected migration DAG head to `f3a4b5c6d7e8`.
+
+
 
 

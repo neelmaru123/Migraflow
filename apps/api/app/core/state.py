@@ -76,6 +76,7 @@ class MigrationPlanLifecycle(NormalizedStrEnum):
     REFINING = "refining"
     APPROVED = "approved"
     RUNNING = "running"
+    ASK_USER = "ask_user"
     COMPLETED = "completed"
     SUPERSEDED = "superseded"
     INVALID = "invalid"
@@ -91,6 +92,7 @@ class ExecutionLifecycle(NormalizedStrEnum):
     RUNNING = "running"
     PAUSED = "paused"
     RECOVERING = "recovering"
+    ASK_USER = "ask_user"
     VERIFYING = "verifying"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -104,6 +106,7 @@ class ExecutionStepLifecycle(NormalizedStrEnum):
     PENDING = "pending"
     RUNNING = "running"
     RETRYING = "retrying"
+    ASK_USER = "ask_user"
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
@@ -117,6 +120,7 @@ class ExecutionPlanLifecycle(NormalizedStrEnum):
     PENDING = "pending"
     RUNNING = "running"
     PAUSED = "paused"
+    ASK_USER = "ask_user"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -136,6 +140,65 @@ class ExecutionStepType(NormalizedStrEnum):
     VERIFY = "verify"
 
 
+class FailureCategory(NormalizedStrEnum):
+    """
+    Centralized failure categories across the entire platform.
+    """
+    TRANSIENT_NETWORK = "transient_network"
+    TRANSIENT_DATABASE = "transient_database"
+    SOURCE_UNAVAILABLE = "source_unavailable"
+    TARGET_UNAVAILABLE = "target_unavailable"
+    AUTHENTICATION = "authentication"
+    AUTHORIZATION = "authorization"
+    SCHEMA_CHANGED = "schema_changed"
+    SOURCE_SCHEMA_MISMATCH = "source_schema_mismatch"
+    TARGET_SCHEMA_MISMATCH = "target_schema_mismatch"
+    DATA_VALIDATION = "data_validation"
+    CONSTRAINT_VIOLATION = "constraint_violation"
+    TRANSFORMATION_ERROR = "transformation_error"
+    RESOURCE_EXHAUSTION = "resource_exhaustion"
+    TIMEOUT = "timeout"
+    AGENT_CRASH = "agent_crash"
+    AGENT_LOST = "agent_lost"
+    PLAN_INVALID = "plan_invalid"
+    PLAN_INFEASIBLE = "plan_infeasible"
+    USER_CANCELLED = "user_cancelled"
+    UNKNOWN = "unknown"
+
+
+class FailureSeverity(NormalizedStrEnum):
+    """
+    Failure severity levels.
+    """
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class FailureDomain(NormalizedStrEnum):
+    """
+    Domain boundaries separating LLM infrastructure, LLM output, DB, and execution.
+    """
+    LLM_INFRASTRUCTURE = "llm_infrastructure"
+    LLM_OUTPUT_VALIDATION = "llm_output_validation"
+    MIGRATION_EXECUTION = "migration_execution"
+    DATABASE_ENGINE = "database_engine"
+    SECURITY_AUTH = "security_auth"
+    SYSTEM_ORCHESTRATION = "system_orchestration"
+
+
+class RecoveryDecisionType(NormalizedStrEnum):
+    """
+    Deterministic recovery outcomes computed by RecoveryRouter.
+    """
+    RETRY = "retry"
+    RECOVER = "recover"
+    REPLAN = "replan"
+    ASK_USER = "ask_user"
+    FAIL = "fail"
+
+
 class ExecutionEventType(str, Enum):
     """
     Durable append-only execution and system event types.
@@ -145,6 +208,7 @@ class ExecutionEventType(str, Enum):
     PLAN_VALIDATED = "PLAN_VALIDATED"
     PLAN_REFINED = "PLAN_REFINED"
     PLAN_APPROVED = "PLAN_APPROVED"
+    PLAN_APPROVAL_REVOKED = "PLAN_APPROVAL_REVOKED"
     PLAN_SUPERSEDED = "PLAN_SUPERSEDED"
 
     # Execution Plan Events
@@ -176,6 +240,12 @@ class ExecutionEventType(str, Enum):
     RETRY_STARTED = "RETRY_STARTED"
     RECOVERY_STARTED = "RECOVERY_STARTED"
     REPLAN_REQUESTED = "REPLAN_REQUESTED"
+    REPLAN_COMPLETED = "REPLAN_COMPLETED"
+    REPLAN_FAILED = "REPLAN_FAILED"
+
+    # User Intervention Events
+    USER_INTERVENTION_REQUESTED = "USER_INTERVENTION_REQUESTED"
+    USER_INTERVENTION_RESOLVED = "USER_INTERVENTION_RESOLVED"
 
     # Verification Events
     VERIFICATION_STARTED = "VERIFICATION_STARTED"

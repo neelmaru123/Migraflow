@@ -47,5 +47,5 @@ class User(Base):
         "Agent", back_populates="user", cascade="all, delete-orphan"
     )
     migration_plans: Mapped[List["MigrationPlan"]] = relationship(
-        "MigrationPlan", back_populates="user", cascade="all, delete-orphan"
+        "MigrationPlan", back_populates="user", cascade="all, delete-orphan", foreign_keys="[MigrationPlan.user_id]"
     )

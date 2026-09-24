@@ -19,7 +19,9 @@ from app.core.state import (
     ExecutionPlanLifecycle,
     ExecutionStepLifecycle,
     ExecutionStepType,
+    FailureCategory,
     InvalidStateTransitionError,
+    RecoveryDecisionType,
 )
 from app.modules.execution.execution_models import (
     AgentRun,
@@ -28,7 +30,10 @@ from app.modules.execution.execution_models import (
     MigrationExecutionPlan,
     MigrationExecutionStep,
     MigrationJob,
+    UserIntervention,
 )
+from app.modules.execution.failure_taxonomy import ClassifiedFailure, FailureClassifier
+from app.modules.execution.recovery_router import recovery_router
 from app.modules.execution.retry_policy import DEFAULT_RETRY_POLICY, RetryPolicy
 from app.modules.migration_plans.migration_plans_models import MigrationPlan
 
@@ -512,9 +517,8 @@ class ExecutionPlanService:
         retry_policy: Optional[RetryPolicy] = None,
     ) -> MigrationExecutionStep:
         """
-        Handles execution step failure. Evaluates the RetryPolicy:
-        - If retryable and attempt_count < max_attempts: marks step as RETRYING.
-        - If non-retryable or attempts exhausted: marks step, execution plan, and job as FAILED.
+        Handles execution step failure via centralized FailureClassifier & RecoveryRouter.
+        Determines deterministic outcome: RETRY, RECOVER, REPLAN, ASK_USER, or FAIL.
         """
         stmt = (
             select(MigrationExecutionStep)
@@ -527,41 +531,113 @@ class ExecutionPlanService:
         if not step:
             raise ValueError(f"Execution step '{step_id}' not found.")
 
-        policy = retry_policy or DEFAULT_RETRY_POLICY
         now = datetime.now(timezone.utc)
         step.error_type = error_type
         step.error_message = error_message
         step.updated_at = now
 
-        can_retry = policy.should_retry(step.attempt_count, error_type)
+        exec_plan = step.execution_plan
+        job_id = exec_plan.migration_job_id if exec_plan else None
+        plan_id = exec_plan.migration_plan_id if exec_plan else None
 
-        if can_retry:
+        # 1. Unified Failure Classification
+        classified_failure = FailureClassifier.classify_error_payload(
+            error_type=error_type,
+            error_message=error_message or "",
+            context={"step_key": step.step_key, "step_type": step.step_type},
+        )
+        step.failure_category = classified_failure.category.value
+        step.failure_code = classified_failure.code
+
+        # 2. Deterministic Recovery Decision
+        decision = recovery_router.evaluate(
+            failure=classified_failure,
+            step_type=step.step_type,
+            step_key=step.step_key,
+            attempt_count=step.attempt_count,
+            replan_count=step.replan_count,
+            recovery_count=step.recovery_count,
+            table_name=step.input_definition.get("target_table_name"),
+        )
+
+        logger.info(
+            f"[ExecutionPlanService] Step '{step.step_key}' decision: action='{decision.action.value}', reason='{decision.reason}'"
+        )
+
+        # 3. Apply Decision
+        if decision.action == RecoveryDecisionType.RETRY:
             step.status = ExecutionStepLifecycle.RETRYING.value
             event_type = ExecutionEventType.STEP_RETRYING.value
-            logger.warning(
-                f"Step '{step.step_key}' failed (Attempt {step.attempt_count}/{step.max_attempts}). "
-                f"Marked for RETRY. Error: {error_message}"
+
+        elif decision.action == RecoveryDecisionType.RECOVER:
+            step.status = ExecutionStepLifecycle.RETRYING.value
+            step.recovery_count += 1
+            if exec_plan:
+                exec_plan.recovery_count += 1
+            event_type = ExecutionEventType.RECOVERY_STARTED.value
+
+        elif decision.action == RecoveryDecisionType.ASK_USER:
+            step.status = ExecutionStepLifecycle.ASK_USER.value
+            if exec_plan:
+                exec_plan.status = ExecutionPlanLifecycle.ASK_USER.value
+            if job_id:
+                stmt_job = select(MigrationJob).where(MigrationJob.id == job_id)
+                res_job = await session.execute(stmt_job)
+                job = res_job.scalar_one_or_none()
+                if job:
+                    job.status = ExecutionLifecycle.ASK_USER.value
+                    job.error_message = decision.reason
+
+            # Create UserIntervention record
+            prompt_data = decision.user_prompt or {}
+            intervention = UserIntervention(
+                id=uuid.uuid4(),
+                migration_job_id=job_id,
+                step_id=step.id,
+                failure_category=classified_failure.category.value,
+                failure_code=classified_failure.code,
+                question=prompt_data.get("question", classified_failure.message),
+                suggested_action=prompt_data.get("suggested_action", "user_intervention"),
+                options=prompt_data.get("options", []),
+                context_data=classified_failure.to_dict(),
+                status="pending",
+                created_at=now,
             )
-        else:
+            session.add(intervention)
+            event_type = ExecutionEventType.USER_INTERVENTION_REQUESTED.value
+
+        elif decision.action == RecoveryDecisionType.REPLAN:
+            step.status = ExecutionStepLifecycle.FAILED.value
+            step.finished_at = now
+            event_type = ExecutionEventType.REPLAN_REQUESTED.value
+
+            # Trigger automated replan via AgenticReplanService
+            if job_id:
+                try:
+                    from app.modules.execution.agentic_replan_services import AgenticReplanService
+                    await AgenticReplanService.replan_execution_failure(
+                        session=session,
+                        job_id=job_id,
+                        step_id=step.id,
+                        failure=classified_failure,
+                    )
+                except Exception as replan_err:
+                    logger.error(f"Failed to trigger agentic replanning for step '{step.step_key}': {replan_err}")
+
+        else:  # FAIL
             step.status = ExecutionStepLifecycle.FAILED.value
             step.finished_at = now
             event_type = ExecutionEventType.STEP_FAILED.value
-            logger.error(
-                f"Step '{step.step_key}' permanently FAILED after {step.attempt_count} attempts. Error: {error_message}"
-            )
 
-            # Mark ExecutionPlan as FAILED
-            if step.execution_plan:
-                exec_plan = step.execution_plan
+            if exec_plan:
                 exec_plan.status = ExecutionPlanLifecycle.FAILED.value
                 exec_plan.finalized_at = now
 
-                # Emit EXECUTION_PLAN_FAILED event
                 plan_event = ExecutionEvent(
                     id=uuid.uuid4(),
                     event_id=uuid.uuid4(),
-                    migration_job_id=exec_plan.migration_job_id,
-                    migration_plan_id=exec_plan.migration_plan_id,
+                    migration_job_id=job_id,
+                    migration_plan_id=plan_id,
                     event_type=ExecutionEventType.EXECUTION_PLAN_FAILED.value,
                     actor_type="system",
                     actor_id="execution_engine",
@@ -569,28 +645,30 @@ class ExecutionPlanService:
                     payload={
                         "execution_plan_id": str(exec_plan.id),
                         "failed_step_key": step.step_key,
+                        "failure_category": classified_failure.category.value,
+                        "failure_code": classified_failure.code,
                         "error_message": error_message,
                     },
                     schema_version=1,
                 )
                 session.add(plan_event)
 
-                # Mark MigrationJob as FAILED
-                stmt_job = select(MigrationJob).where(MigrationJob.id == exec_plan.migration_job_id)
-                res_job = await session.execute(stmt_job)
-                job = res_job.scalar_one_or_none()
-                if job:
-                    job.status = ExecutionLifecycle.FAILED.value
-                    job.completed_at = now
-                    job.error_message = f"Step '{step.step_key}' failed: {error_message}"
+                if job_id:
+                    stmt_job = select(MigrationJob).where(MigrationJob.id == job_id)
+                    res_job = await session.execute(stmt_job)
+                    job = res_job.scalar_one_or_none()
+                    if job:
+                        job.status = ExecutionLifecycle.FAILED.value
+                        job.completed_at = now
+                        job.error_message = f"Step '{step.step_key}' failed: {error_message}"
 
-        # Emit Step Event
+        # Emit Step Audit Event
         event = ExecutionEvent(
             id=uuid.uuid4(),
             event_id=uuid.uuid4(),
             agent_run_id=step.agent_run_id,
-            migration_job_id=step.execution_plan.migration_job_id if step.execution_plan else None,
-            migration_plan_id=step.execution_plan.migration_plan_id if step.execution_plan else None,
+            migration_job_id=job_id,
+            migration_plan_id=plan_id,
             event_type=event_type,
             actor_type="agent",
             actor_id=str(step.agent_run_id or "system"),
@@ -599,14 +677,213 @@ class ExecutionPlanService:
                 "step_id": str(step.id),
                 "step_key": step.step_key,
                 "attempt_count": step.attempt_count,
+                "failure_category": classified_failure.category.value,
+                "failure_code": classified_failure.code,
+                "decision": decision.action.value,
                 "error_type": error_type,
                 "error_message": error_message,
             },
             schema_version=1,
         )
         session.add(event)
-
         return step
+
+    @classmethod
+    async def create_user_intervention(
+        cls,
+        session: AsyncSession,
+        job_id: uuid.UUID,
+        step_id: Optional[uuid.UUID],
+        failure_category: str,
+        failure_code: str,
+        question: str,
+        options: List[Dict[str, Any]],
+        suggested_action: Optional[str] = None,
+        context_data: Optional[Dict[str, Any]] = None,
+    ) -> UserIntervention:
+        """Explicitly creates a durable UserIntervention record and sets job to ask_user."""
+        now = datetime.now(timezone.utc)
+        intervention = UserIntervention(
+            id=uuid.uuid4(),
+            migration_job_id=job_id,
+            step_id=step_id,
+            failure_category=failure_category,
+            failure_code=failure_code,
+            question=question,
+            suggested_action=suggested_action,
+            options=options,
+            context_data=context_data or {},
+            status="pending",
+            created_at=now,
+        )
+        session.add(intervention)
+
+        stmt_job = select(MigrationJob).where(MigrationJob.id == job_id)
+        res_job = await session.execute(stmt_job)
+        job = res_job.scalar_one_or_none()
+        if job:
+            job.status = ExecutionLifecycle.ASK_USER.value
+            job.error_message = question
+
+        if step_id:
+            stmt_step = select(MigrationExecutionStep).where(MigrationExecutionStep.id == step_id)
+            res_step = await session.execute(stmt_step)
+            step = res_step.scalar_one_or_none()
+            if step:
+                step.status = ExecutionStepLifecycle.ASK_USER.value
+
+        event = ExecutionEvent(
+            id=uuid.uuid4(),
+            event_id=uuid.uuid4(),
+            migration_job_id=job_id,
+            event_type=ExecutionEventType.USER_INTERVENTION_REQUESTED.value,
+            actor_type="system",
+            actor_id="ExecutionPlanService",
+            timestamp=now,
+            payload={"question": question, "suggested_action": suggested_action},
+            schema_version=1,
+        )
+        session.add(event)
+        await session.commit()
+        await session.refresh(intervention)
+        return intervention
+
+    @classmethod
+    async def list_user_interventions(
+        cls,
+        session: AsyncSession,
+        job_id: uuid.UUID,
+    ) -> List[UserIntervention]:
+        """Lists all user interventions for a migration job."""
+        stmt = (
+            select(UserIntervention)
+            .where(UserIntervention.migration_job_id == job_id)
+            .order_by(UserIntervention.created_at.desc())
+        )
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    @classmethod
+    async def resolve_user_intervention(
+        cls,
+        session: AsyncSession,
+        intervention_id: uuid.UUID,
+        user_id: uuid.UUID,
+        action: str,
+        response_data: Optional[Dict[str, Any]] = None,
+    ) -> UserIntervention:
+        """
+        Resolves a pending UserIntervention and resumes or redirects execution:
+        - 'retry' / 'truncate_and_proceed': Resumes execution
+        - 'replan': Invokes replanning
+        - 'fail' / 'abort': Permanently fails the job
+        """
+        stmt = (
+            select(UserIntervention)
+            .where(UserIntervention.id == intervention_id)
+            .with_for_update()
+        )
+        res = await session.execute(stmt)
+        intervention = res.scalar_one_or_none()
+        if not intervention:
+            raise ValueError(f"User intervention '{intervention_id}' not found.")
+
+        now = datetime.now(timezone.utc)
+        intervention.status = "resolved"
+        intervention.user_response = {"action": action, "data": response_data or {}}
+        intervention.resolved_by_user_id = user_id
+        intervention.resolved_at = now
+
+        job_id = intervention.migration_job_id
+        step_id = intervention.step_id
+
+        # Fetch job and plan
+        stmt_job = (
+            select(MigrationJob)
+            .options(
+                selectinload(MigrationJob.execution_plan).selectinload(MigrationExecutionPlan.steps),
+                selectinload(MigrationJob.plan),
+            )
+            .where(MigrationJob.id == job_id)
+        )
+        res_job = await session.execute(stmt_job)
+        job = res_job.scalar_one_or_none()
+
+        action_norm = action.strip().lower()
+
+        if action_norm in {"retry", "truncate_and_proceed", "proceed"}:
+            if action_norm == "truncate_and_proceed" and job:
+                job.truncate_target = True
+
+            if job:
+                job.status = ExecutionLifecycle.RUNNING.value
+            if job and job.execution_plan:
+                job.execution_plan.status = ExecutionPlanLifecycle.RUNNING.value
+
+            if step_id and job and job.execution_plan:
+                for s in job.execution_plan.steps:
+                    if s.id == step_id:
+                        s.status = ExecutionStepLifecycle.RETRYING.value
+                        s.updated_at = now
+                        break
+
+            event = ExecutionEvent(
+                id=uuid.uuid4(),
+                event_id=uuid.uuid4(),
+                migration_job_id=job_id,
+                event_type=ExecutionEventType.USER_INTERVENTION_RESOLVED.value,
+                actor_type="user",
+                actor_id=str(user_id),
+                timestamp=now,
+                payload={"action": action, "response_data": response_data},
+                schema_version=1,
+            )
+            session.add(event)
+
+        elif action_norm in {"replan", "manual_edit"}:
+            classified_failure = FailureClassifier.classify_error_payload(
+                error_type=intervention.failure_category,
+                error_message=intervention.question,
+            )
+            from app.modules.execution.agentic_replan_services import AgenticReplanService
+            await AgenticReplanService.replan_execution_failure(
+                session=session,
+                job_id=job_id,
+                step_id=step_id,
+                failure=classified_failure,
+            )
+
+        elif action_norm in {"fail", "abort", "cancel"}:
+            if job:
+                job.status = ExecutionLifecycle.FAILED.value
+                job.completed_at = now
+                job.error_message = f"Aborted by user during intervention: {intervention.question}"
+            if job and job.execution_plan:
+                job.execution_plan.status = ExecutionPlanLifecycle.FAILED.value
+                job.execution_plan.finalized_at = now
+            if step_id and job and job.execution_plan:
+                for s in job.execution_plan.steps:
+                    if s.id == step_id:
+                        s.status = ExecutionStepLifecycle.FAILED.value
+                        s.finished_at = now
+                        break
+
+            event = ExecutionEvent(
+                id=uuid.uuid4(),
+                event_id=uuid.uuid4(),
+                migration_job_id=job_id,
+                event_type=ExecutionEventType.JOB_FAILED.value,
+                actor_type="user",
+                actor_id=str(user_id),
+                timestamp=now,
+                payload={"action": action, "reason": "Aborted by user via intervention."},
+                schema_version=1,
+            )
+            session.add(event)
+
+        await session.commit()
+        await session.refresh(intervention)
+        return intervention
 
     @classmethod
     async def recover_stale_steps(

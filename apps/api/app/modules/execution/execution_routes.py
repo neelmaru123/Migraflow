@@ -25,6 +25,8 @@ from app.modules.execution.execution_schemas import (
     ExecutionStepCompleteRequest,
     ExecutionStepFailRequest,
     ExecutionStepResponse,
+    UserInterventionRespondRequest,
+    UserInterventionResponse,
 )
 from app.modules.execution.execution_services import ExecutionService
 from app.modules.users.users_models import User
@@ -353,4 +355,42 @@ async def update_execution_progress(
     """
     return await ExecutionService.update_job_progress(
         session=session, job_id=id, update=update, agent_id=agent.id
+    )
+
+
+@execution_router.get(
+    "/executions/{id}/interventions",
+    response_model=List[UserInterventionResponse],
+    summary="List all user interventions for an execution job",
+)
+async def list_job_interventions(
+    id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """Lists human-in-the-loop (ASK_USER) intervention requests for an execution job."""
+    return await ExecutionService.list_user_interventions(session=session, job_id=id)
+
+
+@execution_router.post(
+    "/executions/{id}/interventions/{intervention_id}/respond",
+    response_model=UserInterventionResponse,
+    summary="Respond to a pending user intervention",
+)
+async def respond_to_intervention(
+    id: UUID,
+    intervention_id: UUID,
+    body: UserInterventionRespondRequest,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Submits user response/decision for an ASK_USER intervention, resuming or redirecting execution.
+    """
+    return await ExecutionService.resolve_user_intervention(
+        session=session,
+        intervention_id=intervention_id,
+        user_id=current_user.id,
+        action=body.action,
+        response_data=body.response_data,
     )

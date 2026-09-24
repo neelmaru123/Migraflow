@@ -6,7 +6,7 @@ import asyncio
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from fastapi import HTTPException, status
 from sqlalchemy import select, update, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1040,6 +1040,31 @@ class ExecutionService:
         await session.commit()
         await session.refresh(step)
         return step
+
+    @staticmethod
+    async def list_user_interventions(
+        session: AsyncSession,
+        job_id: uuid.UUID,
+    ) -> List[Any]:
+        """Lists pending and resolved user interventions for a migration job."""
+        return await ExecutionPlanService.list_user_interventions(session, job_id)
+
+    @staticmethod
+    async def resolve_user_intervention(
+        session: AsyncSession,
+        intervention_id: uuid.UUID,
+        user_id: uuid.UUID,
+        action: str,
+        response_data: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Resolves an ASK_USER intervention and resumes or redirects execution."""
+        return await ExecutionPlanService.resolve_user_intervention(
+            session=session,
+            intervention_id=intervention_id,
+            user_id=user_id,
+            action=action,
+            response_data=response_data,
+        )
 
 
 async def _run_diagnosis_background(job_id: uuid.UUID):
