@@ -2075,4 +2075,36 @@ Established a durable control-plane state machine around the existing execution 
 - In-memory Task Managers (`RefinementTaskManager`, `GenerationTaskManager`) remain in memory for now and are planned for Phase 2 formalization.
 - Agent run heartbeat liveness is currently linked to `Agent.last_seen_at`; per-run timeout leases can be refined in Phase 2.
 
+---
+
+## [2026-09-24] - Phase 2: Durable Execution Plan, Steps, Checkpointing and Recovery
+
+### 1. Decision Summary
+Converted execution from a coarse `MigrationJob` loop into a durable execution graph model capable of surviving agent crashes, API restarts, and network drops:
+1. **Durable Execution Plan (`MigrationExecutionPlan`)**: Derived from the approved `MigrationPlan` AST without altering the source AST, modeling the execution lifecycle (`pending`, `running`, `paused`, `completed`, `failed`, `cancelled`) and controlled concurrency limits (`concurrency_limit`).
+2. **Granular Execution Steps (`MigrationExecutionStep`)**: Decomposed migration workflows into an ordered DAG of steps (`preflight` $\to$ `pre_ddl` $\to$ `load:<table>` $\to$ `post_ddl` $\to$ `verify`) with explicit dependencies, attempt tracking (`attempt_count`, `max_attempts`), and agent run assignment (`agent_run_id`).
+3. **Authoritative Control-Plane Checkpoints (`ExecutionCheckpoint`)**: Persisted authoritative chunk cursors (`cursor_offset`, `rows_processed`, `source_position`, `checkpoint_version`) in PostgreSQL/SQLite, while retaining local `/tmp` disk caching on Docker Agents as a fast local optimization.
+4. **Step Claiming with Row Locking (`with_for_update(skip_locked=True)`)**: Implemented database-backed step claiming that verifies DAG prerequisite completion and bounds concurrency.
+5. **Stale Step Recovery & Agent Reassignment**: Enhanced watchdog to detect stalled steps, fail dead agent runs, mark steps as `retrying`, and allow reassignment to new or rebooted agents resuming from durable checkpoints without restarting the entire migration.
+6. **Retry Policy Foundation (`RetryPolicy`)**: Established a reusable policy abstraction supporting exponential backoff, full jitter, attempt bounds, and error categorization (transient vs non-retryable).
+7. **Linear Database Migration**: Created Alembic revision `014_add_execution_plans_steps_checkpoints.py` (`e2f3a4b5c6d7`).
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Coarse migration loops stored in-flight progress in container memory and local `/tmp` JSON files. If an agent died mid-migration, progress was lost, jobs required restarting from table 0, and multiple concurrent workers could not safely claim independent table tasks.
+- **Chosen Solution**:
+  - `MigrationExecutionPlan` + `MigrationExecutionStep` DAG: Guarantees that prerequisite operations (schema creation, pre-DDL) strictly complete before table loading begins, while independent tables can run concurrently up to `concurrency_limit`.
+  - Database-backed `ExecutionCheckpoint`: Authoritative truth resides in the control plane database. On container death, any failover agent reads the latest cursor and continues streaming.
+  - Resume Semantics: At-least-once streaming with deterministic fallback UUIDs and keyset pagination ensures idempotent row insertion without duplicates or data loss.
+  - Granular Recovery: Reassignd only the specific failed step rather than aborting or restarting already completed tables.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Ephemeral In-Memory DAG Scheduler (e.g., Celery/Airflow in memory)**:
+  - _Rejected_: Introduces heavy third-party broker dependencies (Redis/RabbitMQ/Airflow webservers) and risks losing active task states during control plane redeployments.
+- **Alternative B: Relying Exclusively on Local File Checkpoints (`/tmp`)**:
+  - _Rejected_: Docker containers are ephemeral; destroying or rescheduling a container to a new host wipes the `/tmp` volume, causing migrations to restart from zero.
+
+### 4. Trade-offs & Future Considerations
+- Autonomous replanning and self-healing LLM auto-corrections during runtime execution are intentionally deferred to Phase 3.
+
+
 

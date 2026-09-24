@@ -19,7 +19,15 @@ from app.core.state import (
     InvalidStateTransitionError,
 )
 from app.modules.agents.agents_models import Agent
-from app.modules.execution.execution_models import AgentRun, ExecutionEvent, MigrationJob
+from app.modules.execution.execution_models import (
+    AgentRun,
+    ExecutionCheckpoint,
+    ExecutionEvent,
+    MigrationExecutionPlan,
+    MigrationExecutionStep,
+    MigrationJob,
+)
+from app.modules.execution.execution_plan_services import ExecutionPlanService
 from app.modules.execution.execution_state_machine import ExecutionStateMachine
 from app.modules.execution.execution_schemas import (
     ExecutionProgressUpdate,
@@ -249,6 +257,11 @@ class ExecutionService:
         session.add(job)
         await session.flush()
 
+        # Derive durable MigrationExecutionPlan and DAG steps
+        await ExecutionPlanService.create_execution_plan_for_job(
+            session=session, job=job, plan=plan
+        )
+
         # Emit durable append-only JOB_CREATED event
         event = ExecutionEvent(
             id=uuid.uuid4(),
@@ -333,7 +346,11 @@ class ExecutionService:
 
         await session.commit()
 
-        stmt_fetch = select(MigrationJob).where(MigrationJob.id.in_(job_ids))
+        stmt_fetch = (
+            select(MigrationJob)
+            .options(selectinload(MigrationJob.execution_plan))
+            .where(MigrationJob.id.in_(job_ids))
+        )
         res_fetch = await session.execute(stmt_fetch)
         jobs = list(res_fetch.scalars().all())
 
@@ -347,6 +364,8 @@ class ExecutionService:
                 actor_type="agent",
                 actor_id=str(agent_id),
             )
+            if job.execution_plan:
+                setattr(job, "execution_plan_id", job.execution_plan.id)
         await session.commit()
         return jobs
 
@@ -396,6 +415,11 @@ class ExecutionService:
                         "error_message": job.error_message,
                     },
                 )
+
+        # Recover stale steps across all active execution plans
+        await ExecutionPlanService.recover_stale_steps(
+            session=session, stale_threshold_seconds=stale_threshold_seconds
+        )
 
         await session.commit()
         return len(stale_jobs)
@@ -910,6 +934,112 @@ class ExecutionService:
         )
         res = await session.execute(stmt)
         return list(res.scalars().all())
+
+    @staticmethod
+    async def get_execution_plan_for_job(
+        session: AsyncSession, job_id: uuid.UUID, user_id: Optional[uuid.UUID] = None
+    ) -> Optional[MigrationExecutionPlan]:
+        """Fetch the derived MigrationExecutionPlan with steps and checkpoints for a job."""
+        stmt = (
+            select(MigrationExecutionPlan)
+            .options(
+                selectinload(MigrationExecutionPlan.steps).selectinload(
+                    MigrationExecutionStep.checkpoints
+                )
+            )
+            .join(MigrationJob, MigrationExecutionPlan.migration_job_id == MigrationJob.id)
+        )
+        if user_id:
+            stmt = stmt.join(MigrationPlan, MigrationJob.migration_plan_id == MigrationPlan.id).where(
+                MigrationPlan.user_id == user_id
+            )
+        stmt = stmt.where(MigrationExecutionPlan.migration_job_id == job_id)
+        res = await session.execute(stmt)
+        return res.scalar_one_or_none()
+
+    @staticmethod
+    async def claim_next_step(
+        session: AsyncSession,
+        execution_plan_id: uuid.UUID,
+        agent_id: uuid.UUID,
+        agent_run_id: uuid.UUID,
+    ) -> Optional[MigrationExecutionStep]:
+        """Claims the next available step for an active agent run."""
+        step = await ExecutionPlanService.claim_next_step(
+            session=session,
+            execution_plan_id=execution_plan_id,
+            agent_id=agent_id,
+            agent_run_id=agent_run_id,
+        )
+        if step:
+            await session.commit()
+            await session.refresh(step)
+        return step
+
+    @staticmethod
+    async def save_step_checkpoint(
+        session: AsyncSession,
+        step_id: uuid.UUID,
+        source_identifier: str,
+        source_table: str,
+        target_table: str,
+        cursor_offset: int,
+        rows_processed: int,
+        source_position: Optional[dict] = None,
+    ) -> ExecutionCheckpoint:
+        """Persists an authoritative checkpoint to PostgreSQL/SQLite."""
+        checkpoint = await ExecutionPlanService.save_checkpoint(
+            session=session,
+            step_id=step_id,
+            source_identifier=source_identifier,
+            source_table=source_table,
+            target_table=target_table,
+            cursor_offset=cursor_offset,
+            rows_processed=rows_processed,
+            source_position=source_position,
+        )
+        await session.commit()
+        await session.refresh(checkpoint)
+        return checkpoint
+
+    @staticmethod
+    async def get_step_checkpoints(
+        session: AsyncSession, step_id: uuid.UUID
+    ) -> List[ExecutionCheckpoint]:
+        """Fetches all checkpoints for an execution step."""
+        return await ExecutionPlanService.get_checkpoints_for_step(session, step_id)
+
+    @staticmethod
+    async def complete_step(
+        session: AsyncSession,
+        step_id: uuid.UUID,
+        output_summary: Optional[dict] = None,
+    ) -> MigrationExecutionStep:
+        """Marks a step completed and checks for whole plan completion."""
+        step = await ExecutionPlanService.complete_step(
+            session=session, step_id=step_id, output_summary=output_summary
+        )
+        await session.commit()
+        await session.refresh(step)
+        return step
+
+    @staticmethod
+    async def fail_step(
+        session: AsyncSession,
+        step_id: uuid.UUID,
+        error_type: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ) -> MigrationExecutionStep:
+        """Handles step failure and applies retry policy."""
+        step = await ExecutionPlanService.fail_step(
+            session=session,
+            step_id=step_id,
+            error_type=error_type,
+            error_message=error_message or "Execution step failed.",
+        )
+        await session.commit()
+        await session.refresh(step)
+        return step
 
 
 async def _run_diagnosis_background(job_id: uuid.UUID):

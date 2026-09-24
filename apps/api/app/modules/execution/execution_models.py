@@ -5,7 +5,7 @@ Execution Domain Database Models (Jobs, Diagnostic Errors, Agent Runs, and Execu
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
-from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, JSON
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, JSON, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.db import Base
@@ -81,6 +81,9 @@ class MigrationJob(Base):
     # Relationships
     plan: Mapped["MigrationPlan"] = relationship("MigrationPlan", back_populates="jobs")
     agent: Mapped[Optional["Agent"]] = relationship("Agent", back_populates="migration_jobs")
+    execution_plan: Mapped[Optional["MigrationExecutionPlan"]] = relationship(
+        "MigrationExecutionPlan", back_populates="job", uselist=False, cascade="all, delete-orphan"
+    )
     errors: Mapped[List["MigrationError"]] = relationship(
         "MigrationError", back_populates="job", cascade="all, delete-orphan"
     )
@@ -144,6 +147,217 @@ class AgentRun(Base):
     agent: Mapped[Optional["Agent"]] = relationship("Agent", back_populates="agent_runs")
     events: Mapped[List["ExecutionEvent"]] = relationship(
         "ExecutionEvent", back_populates="agent_run"
+    )
+    steps: Mapped[List["MigrationExecutionStep"]] = relationship(
+        "MigrationExecutionStep", back_populates="agent_run"
+    )
+
+
+class MigrationExecutionPlan(Base):
+    """
+    Durable execution representation derived from an approved MigrationPlan.
+    Maintains the state, concurrency limits, and step execution graph for a job.
+    """
+    __tablename__ = "migration_execution_plans"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    migration_job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("migration_jobs.id", ondelete="CASCADE"),
+        unique=True,
+        index=True,
+        nullable=False,
+    )
+    migration_plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("migration_plans.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    migration_plan_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), default="pending", index=True, nullable=False
+    )  # pending, running, paused, completed, failed, cancelled
+    concurrency_limit: Mapped[int] = mapped_column(
+        Integer, default=2, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    finalized_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Relationships
+    job: Mapped["MigrationJob"] = relationship("MigrationJob", back_populates="execution_plan")
+    plan: Mapped["MigrationPlan"] = relationship("MigrationPlan")
+    steps: Mapped[List["MigrationExecutionStep"]] = relationship(
+        "MigrationExecutionStep",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+        order_by="MigrationExecutionStep.sequence",
+    )
+
+
+class MigrationExecutionStep(Base):
+    """
+    Granular execution step within a MigrationExecutionPlan.
+    Tracks state, dependencies, retry attempts, agent run ownership, and execution results.
+    """
+    __tablename__ = "migration_execution_steps"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    execution_plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("migration_execution_plans.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    step_key: Mapped[str] = mapped_column(
+        String(100), index=True, nullable=False
+    )
+    step_type: Mapped[str] = mapped_column(
+        String(50), index=True, nullable=False
+    )  # preflight, create_schema, pre_ddl, extract, transform, load, post_ddl, verify
+    sequence: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    dependencies: Mapped[List[str]] = mapped_column(
+        JSON_TYPE, default=list, nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), default="pending", index=True, nullable=False
+    )  # pending, running, retrying, completed, failed, skipped, cancelled
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    max_attempts: Mapped[int] = mapped_column(
+        Integer, default=3, nullable=False
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    agent_run_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_runs.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    input_definition: Mapped[Dict[str, Any]] = mapped_column(
+        JSON_TYPE, default=dict, nullable=False
+    )
+    output_summary: Mapped[Dict[str, Any]] = mapped_column(
+        JSON_TYPE, default=dict, nullable=False
+    )
+    error_type: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True
+    )
+    error_message: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("execution_plan_id", "step_key", name="uq_execution_steps_plan_step_key"),
+    )
+
+    # Relationships
+    execution_plan: Mapped["MigrationExecutionPlan"] = relationship(
+        "MigrationExecutionPlan", back_populates="steps"
+    )
+    agent_run: Mapped[Optional["AgentRun"]] = relationship(
+        "AgentRun", back_populates="steps"
+    )
+    checkpoints: Mapped[List["ExecutionCheckpoint"]] = relationship(
+        "ExecutionCheckpoint", back_populates="step", cascade="all, delete-orphan"
+    )
+
+
+class ExecutionCheckpoint(Base):
+    """
+    Authoritative durable checkpoint persisted in control plane database.
+    Ensures safe, bounded resume across container destruction, agent reassignment, or API restarts.
+    """
+    __tablename__ = "execution_checkpoints"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    execution_step_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("migration_execution_steps.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    source_identifier: Mapped[str] = mapped_column(
+        String(100), default="default", nullable=False
+    )
+    source_table: Mapped[str] = mapped_column(
+        String(255), nullable=False
+    )
+    target_table: Mapped[str] = mapped_column(
+        String(255), nullable=False
+    )
+    cursor_offset: Mapped[int] = mapped_column(
+        BigInteger, default=0, nullable=False
+    )
+    rows_processed: Mapped[int] = mapped_column(
+        BigInteger, default=0, nullable=False
+    )
+    source_position: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSON_TYPE, nullable=True
+    )
+    checkpoint_version: Mapped[int] = mapped_column(
+        Integer, default=1, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "execution_step_id",
+            "source_identifier",
+            "source_table",
+            "target_table",
+            name="uq_checkpoint_step_source_target",
+        ),
+    )
+
+    # Relationships
+    step: Mapped["MigrationExecutionStep"] = relationship(
+        "MigrationExecutionStep", back_populates="checkpoints"
     )
 
 

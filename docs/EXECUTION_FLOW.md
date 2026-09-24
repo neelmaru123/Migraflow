@@ -1190,4 +1190,77 @@ sequenceDiagram
 - **[MODIFIED]**: [`apps/api/app/modules/execution/execution_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py) — Exposed runs and events endpoints, and handled `Idempotency-Key` headers.
 - **[UNCHANGED]**: `apps/agent/engine/orchestrator.py`, `checkpoint.py`, `target_writer.py`, `ast_transformer.py`, DuckDB staging, and database connectors.
 
+---
+
+# Execution Flow — Phase 2: Durable Execution Plan, Steps, Checkpointing & Recovery
+
+## 1. Entry Point
+- **Files**:
+  - [`apps/api/app/modules/execution/execution_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py) (`POST /api/v1/plans/{plan_id}/execute`, `GET /api/v1/executions/{id}/plan`, `POST /api/v1/executions/plans/{plan_id}/steps/claim`, `POST /api/v1/executions/steps/{step_id}/checkpoint`)
+  - [`apps/agent/main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/main.py) (`poll_and_execute_tasks()`)
+  - [`apps/agent/engine/checkpoint.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/checkpoint.py) (`CheckpointManager.save_checkpoint()`, `CheckpointManager.get_last_offset()`)
+
+## 2. Step-by-Step Execution Sequence
+
+### Step 1: Execution Plan & DAG Step Derivation
+1. **Trigger**: User starts migration execution for an approved plan (`POST /api/v1/plans/{plan_id}/execute`).
+2. **DAG Construction**: `ExecutionPlanService.create_execution_plan_for_job()` constructs:
+   - `MigrationExecutionPlan` with `concurrency_limit = 2` and `status = 'pending'`.
+   - Step 1: `PREFLIGHT` (sequence: 1, dependencies: `[]`).
+   - Step 2: `PRE_DDL` (sequence: 2, dependencies: `["preflight"]`).
+   - Steps 3..N: `LOAD:<table_name>` for each table mapping in `table_mappings` (sequence: 3..N, dependencies: `["pre_ddl"]`).
+   - Step N+1: `POST_DDL` (dependencies: all `load:*` steps).
+   - Step N+2: `VERIFY` (dependencies: `["post_ddl"]`).
+3. **Event Emission**: Emits `EXECUTION_PLAN_CREATED` in `execution_events`.
+
+### Step 2: Concurrency-Controlled Step Claiming
+1. **Poll & Claim**: Docker Agent polls for tasks and requests step claims via `POST /api/v1/executions/plans/{plan_id}/steps/claim`.
+2. **Locking & Prerequisite Validation**:
+   - `ExecutionPlanService.claim_next_step()` queries steps with `with_for_update(skip_locked=True)`.
+   - Checks active running count against `concurrency_limit` (blocks claiming if limit is reached).
+   - Validates that all items in `step.dependencies` are in `status == 'completed'`.
+3. **State Mutation**:
+   - Transitions step to `status = 'running'`, sets `agent_run_id`, sets `started_at = now()`, increments `attempt_count += 1`.
+   - Emits `STEP_CLAIMED` and `STEP_STARTED` events.
+
+### Step 3: Authoritative Checkpoint Persistence
+1. **ETL Chunk Processing**: Docker Agent extracts and bulk loads chunks.
+2. **Dual-Layer Checkpoint**:
+   - Local fast file cache saved under `/tmp/checkpoint_{job_id}_{table}_{src_id}_{src_tbl}.json`.
+   - Control-Plane persistence via `POST /api/v1/executions/steps/{step_id}/checkpoint` (`ExecutionPlanService.save_checkpoint()`).
+   - Writes `cursor_offset`, `rows_processed`, `source_position`, increments `checkpoint_version`, and emits `CHECKPOINT_SAVED`.
+
+### Step 4: Step Completion & Cascade Finalization
+1. **Step Finish**: Agent reports `POST /api/v1/executions/steps/{step_id}/complete` with `output_summary`.
+2. **DAG Finalization Check**:
+   - Step status set to `completed`.
+   - If all steps in the plan are `completed`:
+     - Sets `MigrationExecutionPlan.status = 'completed'`.
+     - Sets `MigrationJob.status = 'completed'` (or `'dry_run_completed'`) and `progress = 100.0`.
+     - Emits `EXECUTION_PLAN_COMPLETED` and `JOB_COMPLETED` events.
+
+### Step 5: Failover Reassignment & Checkpoint Resume
+1. **Watchdog Detection**: If an agent dies mid-step, `recover_stale_steps()` detects `updated_at < now - 300s`.
+2. **Run Marking & Re-queuing**:
+   - Marks previous `agent_run` as `failed`.
+   - If `attempt_count < max_attempts`: resets step status to `retrying`.
+3. **Failover Claim**:
+   - Agent B claims the `retrying` step with its own `agent_run_id_B`.
+   - Fetches authoritative `ExecutionCheckpoint` from the database.
+   - Resumes extraction from `checkpoint.cursor_offset` without restarting the table or already completed steps.
+
+## 3. Impact & Delta Analysis
+- **[NEW]**: [`apps/api/app/modules/execution/execution_plan_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_plan_services.py) — ExecutionPlanService managing DAG derivation, step claiming with locks, authoritative checkpoints, and stale recovery.
+- **[NEW]**: [`apps/api/app/modules/execution/retry_policy.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/retry_policy.py) — Reusable retry policy abstraction with exponential backoff, jitter, and error classification.
+- **[NEW]**: [`apps/api/alembic/versions/014_add_execution_plans_steps_checkpoints.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/alembic/versions/014_add_execution_plans_steps_checkpoints.py) — Linear database migration adding `migration_execution_plans`, `migration_execution_steps`, and `execution_checkpoints`.
+- **[NEW]**: [`apps/api/tests/unit/test_phase2_execution_plans_and_checkpoints.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_phase2_execution_plans_and_checkpoints.py) — 8 unit tests covering DAG creation, concurrency limits, checkpoints, failover recovery, retry policy, and REST routes.
+- **[MODIFIED]**: [`apps/api/app/core/state.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/core/state.py) — Added `ExecutionPlanLifecycle`, `ExecutionStepType`, and execution plan event constants.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_models.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_models.py) — Defined `MigrationExecutionPlan`, `MigrationExecutionStep`, and `ExecutionCheckpoint` ORM models.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_schemas.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_schemas.py) — Added Pydantic schemas for execution plans, steps, checkpoints, claim, complete, and fail requests.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py) — Hooked plan creation into job creation and stale step recovery into watchdog.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py) — Added routes for plan details, step claiming, checkpoint persistence, and completion.
+- **[MODIFIED]**: [`apps/agent/engine/checkpoint.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/checkpoint.py) — Added control plane database sync and fallback lookup.
+- **[MODIFIED]**: [`apps/api/tests/unit/test_alembic_migrations.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_alembic_migrations.py) — Updated expected migration revision DAG head to `e2f3a4b5c6d7`.
+
+
 

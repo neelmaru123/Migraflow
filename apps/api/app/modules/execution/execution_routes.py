@@ -14,10 +14,17 @@ from app.modules.execution.execution_schemas import (
     AgentRunResponse,
     AgentTaskItemResponse,
     ExecutionCancelRequest,
+    ExecutionCheckpointCreate,
+    ExecutionCheckpointResponse,
     ExecutionEventResponse,
     ExecutionJobResponse,
+    ExecutionPlanResponse,
     ExecutionProgressUpdate,
     ExecutionStartRequest,
+    ExecutionStepClaimRequest,
+    ExecutionStepCompleteRequest,
+    ExecutionStepFailRequest,
+    ExecutionStepResponse,
 )
 from app.modules.execution.execution_services import ExecutionService
 from app.modules.users.users_models import User
@@ -162,6 +169,7 @@ async def poll_agent_tasks(
             job_id=job.id,
             migration_plan_id=job.migration_plan_id,
             agent_run_id=job.current_run_id,
+            execution_plan_id=getattr(job, "execution_plan_id", None),
             status=job.status,
             is_dry_run=job.is_dry_run,
             truncate_target=job.truncate_target,
@@ -169,6 +177,133 @@ async def poll_agent_tasks(
         )
         for job in jobs
     ]
+
+
+@execution_router.get(
+    "/executions/{id}/plan",
+    response_model=Optional[ExecutionPlanResponse],
+    summary="Get derived MigrationExecutionPlan with steps and checkpoints",
+)
+async def get_execution_plan(
+    id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """Returns the granular execution DAG, steps, and authoritative checkpoints for a job."""
+    plan = await ExecutionService.get_execution_plan_for_job(
+        session=session, job_id=id, user_id=current_user.id
+    )
+    if not plan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Execution plan for job '{id}' not found.",
+        )
+    return plan
+
+
+@execution_router.post(
+    "/executions/plans/{plan_id}/steps/claim",
+    response_model=Optional[ExecutionStepResponse],
+    summary="Claim the next eligible execution step for an agent run",
+)
+async def claim_execution_step(
+    plan_id: UUID,
+    body: ExecutionStepClaimRequest,
+    agent: Agent = Depends(get_current_agent),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Atomically claims the next eligible step whose dependencies are satisfied.
+    Authenticated via X-Agent-Token request header.
+    """
+    return await ExecutionService.claim_next_step(
+        session=session,
+        execution_plan_id=plan_id,
+        agent_id=agent.id,
+        agent_run_id=body.agent_run_id,
+    )
+
+
+@execution_router.post(
+    "/executions/steps/{step_id}/checkpoint",
+    response_model=ExecutionCheckpointResponse,
+    summary="Save an authoritative execution checkpoint in the control plane",
+)
+async def save_checkpoint(
+    step_id: UUID,
+    body: ExecutionCheckpointCreate,
+    agent: Agent = Depends(get_current_agent),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Persists an authoritative checkpoint to PostgreSQL/SQLite to support safe resumes.
+    Authenticated via X-Agent-Token request header.
+    """
+    return await ExecutionService.save_step_checkpoint(
+        session=session,
+        step_id=step_id,
+        source_identifier=body.source_identifier,
+        source_table=body.source_table,
+        target_table=body.target_table,
+        cursor_offset=body.cursor_offset,
+        rows_processed=body.rows_processed,
+        source_position=body.source_position,
+    )
+
+
+@execution_router.get(
+    "/executions/steps/{step_id}/checkpoints",
+    response_model=List[ExecutionCheckpointResponse],
+    summary="Get authoritative checkpoints for an execution step",
+)
+async def get_step_checkpoints(
+    step_id: UUID,
+    agent: Agent = Depends(get_current_agent),
+    session: AsyncSession = Depends(get_db),
+):
+    """Fetches all authoritative checkpoints associated with a step."""
+    return await ExecutionService.get_step_checkpoints(session=session, step_id=step_id)
+
+
+@execution_router.post(
+    "/executions/steps/{step_id}/complete",
+    response_model=ExecutionStepResponse,
+    summary="Mark an execution step completed",
+)
+async def complete_step(
+    step_id: UUID,
+    body: ExecutionStepCompleteRequest = ExecutionStepCompleteRequest(),
+    agent: Agent = Depends(get_current_agent),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Marks a step completed, advances DAG dependencies, and completes the execution plan if all steps finish.
+    """
+    return await ExecutionService.complete_step(
+        session=session, step_id=step_id, output_summary=body.output_summary
+    )
+
+
+@execution_router.post(
+    "/executions/steps/{step_id}/fail",
+    response_model=ExecutionStepResponse,
+    summary="Report failure on an execution step and evaluate retry policy",
+)
+async def fail_step(
+    step_id: UUID,
+    body: ExecutionStepFailRequest,
+    agent: Agent = Depends(get_current_agent),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Evaluates retry policy against the reported error. If retryable, marks step RETRYING; otherwise FAILED.
+    """
+    return await ExecutionService.fail_step(
+        session=session,
+        step_id=step_id,
+        error_type=body.error_type,
+        error_message=body.error_message,
+    )
 
 
 @execution_router.get(

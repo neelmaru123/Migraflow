@@ -70,6 +70,90 @@ class ExecutionEventResponse(BaseModel):
     schema_version: int = 1
 
 
+class ExecutionCheckpointCreate(BaseModel):
+    """Payload to save an authoritative checkpoint for a step."""
+    source_identifier: str = Field(default="default", max_length=100)
+    source_table: str = Field(..., max_length=255)
+    target_table: str = Field(..., max_length=255)
+    cursor_offset: int = Field(default=0, ge=0)
+    rows_processed: int = Field(default=0, ge=0)
+    source_position: Optional[Dict[str, Any]] = None
+
+
+class ExecutionCheckpointResponse(BaseModel):
+    """Response model for an ExecutionCheckpoint."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    execution_step_id: UUID
+    source_identifier: str
+    source_table: str
+    target_table: str
+    cursor_offset: int
+    rows_processed: int
+    source_position: Optional[Dict[str, Any]] = None
+    checkpoint_version: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class ExecutionStepResponse(BaseModel):
+    """Response model for a granular MigrationExecutionStep."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    execution_plan_id: UUID
+    step_key: str
+    step_type: str
+    sequence: int
+    dependencies: List[str] = Field(default_factory=list)
+    status: str
+    attempt_count: int
+    max_attempts: int
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    agent_run_id: Optional[UUID] = None
+    input_definition: Dict[str, Any] = Field(default_factory=dict)
+    output_summary: Dict[str, Any] = Field(default_factory=dict)
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    checkpoints: List[ExecutionCheckpointResponse] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ExecutionPlanResponse(BaseModel):
+    """Response model for a derived MigrationExecutionPlan."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    migration_job_id: UUID
+    migration_plan_id: UUID
+    migration_plan_version_id: Optional[UUID] = None
+    status: str
+    concurrency_limit: int
+    steps: List[ExecutionStepResponse] = Field(default_factory=list)
+    created_at: datetime
+    finalized_at: Optional[datetime] = None
+
+
+class ExecutionStepClaimRequest(BaseModel):
+    """Request payload when an agent claims execution steps."""
+    agent_id: UUID
+    agent_run_id: UUID
+
+
+class ExecutionStepCompleteRequest(BaseModel):
+    """Request payload when completing a step."""
+    output_summary: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ExecutionStepFailRequest(BaseModel):
+    """Request payload when reporting failure on a step."""
+    error_type: Optional[str] = None
+    error_message: str
+
+
 class ExecutionJobResponse(BaseModel):
     """Response model for a MigrationJob execution entity."""
     model_config = ConfigDict(from_attributes=True)
@@ -103,6 +187,7 @@ class AgentTaskItemResponse(BaseModel):
     job_id: UUID
     migration_plan_id: UUID
     agent_run_id: Optional[UUID] = None
+    execution_plan_id: Optional[UUID] = None
     status: str
     is_dry_run: bool = False
     truncate_target: bool = False

@@ -110,6 +110,32 @@ class ExecutionStepLifecycle(NormalizedStrEnum):
     CANCELLED = "cancelled"
 
 
+class ExecutionPlanLifecycle(NormalizedStrEnum):
+    """
+    Explicit lifecycle states for derived Migration Execution Plans.
+    """
+    PENDING = "pending"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ExecutionStepType(NormalizedStrEnum):
+    """
+    Extensible step types for granular migration execution.
+    """
+    PREFLIGHT = "preflight"
+    CREATE_SCHEMA = "create_schema"
+    PRE_DDL = "pre_ddl"
+    EXTRACT = "extract"
+    TRANSFORM = "transform"
+    LOAD = "load"
+    POST_DDL = "post_ddl"
+    VERIFY = "verify"
+
+
 class ExecutionEventType(str, Enum):
     """
     Durable append-only execution and system event types.
@@ -120,6 +146,11 @@ class ExecutionEventType(str, Enum):
     PLAN_REFINED = "PLAN_REFINED"
     PLAN_APPROVED = "PLAN_APPROVED"
     PLAN_SUPERSEDED = "PLAN_SUPERSEDED"
+
+    # Execution Plan Events
+    EXECUTION_PLAN_CREATED = "EXECUTION_PLAN_CREATED"
+    EXECUTION_PLAN_COMPLETED = "EXECUTION_PLAN_COMPLETED"
+    EXECUTION_PLAN_FAILED = "EXECUTION_PLAN_FAILED"
 
     # Execution Job Lifecycle Events
     JOB_CREATED = "JOB_CREATED"
@@ -133,9 +164,13 @@ class ExecutionEventType(str, Enum):
     JOB_FAILED = "JOB_FAILED"
 
     # Step Execution Events
+    STEP_CLAIMED = "STEP_CLAIMED"
     STEP_STARTED = "STEP_STARTED"
     STEP_COMPLETED = "STEP_COMPLETED"
     STEP_FAILED = "STEP_FAILED"
+    STEP_RETRYING = "STEP_RETRYING"
+    STEP_SKIPPED = "STEP_SKIPPED"
+    CHECKPOINT_SAVED = "CHECKPOINT_SAVED"
 
     # Retry and Recovery Events
     RETRY_STARTED = "RETRY_STARTED"
