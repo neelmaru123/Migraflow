@@ -224,3 +224,57 @@ class AgentTaskItemResponse(BaseModel):
     is_dry_run: bool = False
     truncate_target: bool = False
     created_at: datetime
+
+
+class VerificationResultResponse(BaseModel):
+    """Response DTO for durable post-migration verification result."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    migration_job_id: UUID
+    execution_plan_id: UUID
+    execution_step_id: Optional[UUID] = None
+    check_type: str
+    status: str
+    target_table: Optional[str] = None
+    expected: Optional[Any] = None
+    actual: Optional[Any] = None
+    tolerance: float = 0.0
+    details: Dict[str, Any] = Field(default_factory=dict)
+    error_message: Optional[str] = None
+    created_at: datetime
+
+
+class VerificationRunRequest(BaseModel):
+    """Request payload to manually run or re-evaluate verification suite."""
+    allow_warnings: bool = True
+    row_count_tolerance_pct: float = 0.0
+    max_failed_rows_allowed: int = 0
+    verification_data: Optional[Dict[str, Any]] = None
+
+
+class DestructiveApprovalResponse(BaseModel):
+    """Response DTO for a destructive operation approval record."""
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    migration_plan_id: UUID
+    plan_version_number: int
+    target_table: str
+    operation_type: str
+    risk_level: str
+    approved_by_user_id: Optional[UUID] = None
+    is_approved: bool
+    is_valid: bool
+    approved_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    rejection_reason: Optional[str] = None
+    metadata_snapshot: Optional[Dict[str, Any]] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DestructiveApprovalRejectRequest(BaseModel):
+    """Request payload to reject a destructive operation approval."""
+    reason: str = Field(..., min_length=3, description="Reason for rejection")
+

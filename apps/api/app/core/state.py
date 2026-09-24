@@ -94,6 +94,7 @@ class ExecutionLifecycle(NormalizedStrEnum):
     RECOVERING = "recovering"
     ASK_USER = "ask_user"
     VERIFYING = "verifying"
+    NEEDS_REVIEW = "needs_review"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -107,6 +108,7 @@ class ExecutionStepLifecycle(NormalizedStrEnum):
     RUNNING = "running"
     RETRYING = "retrying"
     ASK_USER = "ask_user"
+    NEEDS_REVIEW = "needs_review"
     COMPLETED = "completed"
     FAILED = "failed"
     SKIPPED = "skipped"
@@ -121,6 +123,7 @@ class ExecutionPlanLifecycle(NormalizedStrEnum):
     RUNNING = "running"
     PAUSED = "paused"
     ASK_USER = "ask_user"
+    NEEDS_REVIEW = "needs_review"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -138,6 +141,42 @@ class ExecutionStepType(NormalizedStrEnum):
     LOAD = "load"
     POST_DDL = "post_ddl"
     VERIFY = "verify"
+
+
+class VerificationStatus(NormalizedStrEnum):
+    """
+    Status of an automated post-migration verification check or full suite.
+    """
+    PASSED = "passed"
+    FAILED = "failed"
+    WARNING = "warning"
+    SKIPPED = "skipped"
+
+
+class VerificationCheckType(NormalizedStrEnum):
+    """
+    Standardized verification check categories.
+    """
+    ROW_COUNT = "row_count"
+    ROWS_PROCESSED = "rows_processed"
+    FAILED_ROWS = "failed_rows"
+    DUPLICATE_DETECTION = "duplicate_detection"
+    PRIMARY_KEY_INTEGRITY = "primary_key_integrity"
+    FOREIGN_KEY_INTEGRITY = "foreign_key_integrity"
+    NULLABILITY = "nullability"
+    TABLE_EXISTENCE = "table_existence"
+    SCHEMA_COMPATIBILITY = "schema_compatibility"
+    TRANSFORMATION_SANITY = "transformation_sanity"
+    SAMPLE_DATA_COMPARISON = "sample_data_comparison"
+
+
+class OperationRiskLevel(NormalizedStrEnum):
+    """
+    Operation risk classification levels for safety governance.
+    """
+    READ_ONLY = "read_only"
+    WRITE = "write"
+    DESTRUCTIVE = "destructive"
 
 
 class FailureCategory(NormalizedStrEnum):
@@ -249,8 +288,16 @@ class ExecutionEventType(str, Enum):
 
     # Verification Events
     VERIFICATION_STARTED = "VERIFICATION_STARTED"
-    VERIFICATION_FAILED = "VERIFICATION_FAILED"
+    VERIFICATION_CHECK_PASSED = "VERIFICATION_CHECK_PASSED"
+    VERIFICATION_CHECK_FAILED = "VERIFICATION_CHECK_FAILED"
+    VERIFICATION_CHECK_WARNING = "VERIFICATION_CHECK_WARNING"
     VERIFICATION_COMPLETED = "VERIFICATION_COMPLETED"
+
+    # Safety and Destructive Approval Events
+    DESTRUCTIVE_APPROVAL_REQUESTED = "DESTRUCTIVE_APPROVAL_REQUESTED"
+    DESTRUCTIVE_APPROVAL_GRANTED = "DESTRUCTIVE_APPROVAL_GRANTED"
+    DESTRUCTIVE_APPROVAL_REVOKED = "DESTRUCTIVE_APPROVAL_REVOKED"
+    DESTRUCTIVE_APPROVAL_REJECTED = "DESTRUCTIVE_APPROVAL_REJECTED"
 
     # Agent Lifecycle Events
     AGENT_REGISTERED = "AGENT_REGISTERED"

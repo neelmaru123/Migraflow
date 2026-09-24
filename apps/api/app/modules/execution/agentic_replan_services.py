@@ -175,10 +175,16 @@ class AgenticReplanService:
 
         # 6. APPROVAL INVALIDATION:
         # A structural replan requires fresh approval before new execution can commence.
+        from app.modules.execution.safety_services import DestructiveApprovalManager
+
         plan.status = MigrationPlanLifecycle.AWAITING_APPROVAL.value
         plan.approved_version_number = None
         plan.approved_by_user_id = None
         plan.approved_at = None
+
+        await DestructiveApprovalManager.invalidate_all_for_plan(
+            session, plan.id, "Plan replanned due to execution failure"
+        )
 
         event_revoked = ExecutionEvent(
             id=uuid.uuid4(),

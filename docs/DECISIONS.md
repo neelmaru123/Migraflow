@@ -2146,8 +2146,62 @@ Implemented a resilient, deterministic, closed-loop recovery and replanning arch
   - _Rejected_: If AI modifies column casts or creates new target tables, executing without fresh human review violates database safety and compliance rules.
 
 ### 4. Trade-offs & Future Considerations
-- Phase 4 will introduce live CDC streaming, target validation metrics, and performance optimizations.
+- Phase 4 completes the verification subsystem, safety tiering, and approval integrity governance.
 
+---
 
+## [2026-09-24] - Phase 4: Post-Migration Verification, Safety Controls, and Approval Integrity
 
+### 1. Decision Summary
+Implemented comprehensive post-migration verification, safety classification, and destructive operation governance:
+1. **Deterministic Verification Subsystem (`VerificationEngine`)**:
+   - Implemented 11 standardized post-migration verification checks:
+     1. Source row count vs target row count (with configurable tolerance percentage).
+     2. Rows successfully processed vs total expected rows.
+     3. Failed rows threshold check (`max_failed_rows_allowed`).
+     4. Duplicate records detection on target primary/unique keys.
+     5. Primary key integrity (checks for NULL or non-unique PK values).
+     6. Foreign key referential integrity (checks for orphaned records referencing missing parent keys).
+     7. Nullability constraint validation on target tables.
+     8. Target table existence validation.
+     9. Column and data type schema compatibility.
+     10. Transformation sanity checks (value range and required target field bounds).
+     11. Deterministic sample data comparison (hash and record equality).
+2. **Configurable Verification Policies (`VerificationPolicy`)**:
+   - Granular controls over `allow_warnings`, `row_count_tolerance_pct`, `max_failed_rows_allowed`, `strict_fk_enforcement`, and `enabled_checks`.
+3. **Durable Verification Records (`VerificationResult`)**:
+   - Persists every individual check result (`passed`, `failed`, `warning`, `skipped`) with expected vs actual values, tolerance, execution step ID, and JSON details.
+4. **Verification Lifecycle Integration (`VerificationCoordinator`)**:
+   - Migration jobs cannot reach `COMPLETED` merely because the ETL loop finishes.
+   - Flow: `EXECUTION (RUNNING)` $\to$ `VERIFYING` $\to$ `VERIFICATION RESULT` $\to$ `COMPLETED` / `FAILED` / `NEEDS_REVIEW`.
+   - Verification failures automatically generate a `ClassifiedFailure` (`DATA_VALIDATION`) and route into the Phase 3 `RecoveryRouter` (`REPLAN`, `ASK_USER`, or `FAIL`).
+5. **Operation Safety Classification (`SafetyClassifier`)**:
+   - Tiers operations into `READ_ONLY`, `WRITE`, and `DESTRUCTIVE`.
+   - Flags `DROP TABLE`, `TRUNCATE`, `DELETE FROM`, `CASCADE`, and `DROP COLUMN` as `DESTRUCTIVE`.
+6. **Destructive Operation Approval Governance (`DestructiveApprovalManager`)**:
+   - All destructive operations require explicit approval bound strictly to exact `(plan_id, plan_version, target, operation, user_id, timestamp)`.
+   - Invalidation rule: Any modification to the plan AST or agentic replan immediately invalidates all previous destructive approvals (`is_valid = False`).
+   - Exposed REST endpoints: `GET /plans/{plan_id}/destructive-approvals`, `POST /plans/{plan_id}/destructive-approvals/{approval_id}/grant`, `POST /plans/{plan_id}/destructive-approvals/{approval_id}/reject`.
+7. **Zero-Leakage Credential & Data Boundary (`CredentialSanitizer`)**:
+   - Masks database passwords in URIs, Bearer tokens, PEM keys, and assignment strings.
+   - Recursively scrubs dictionaries and payload structures.
+   - AI error diagnosis explicitly redacts raw table rows (`<N rows redacted for security>`) while preserving schema names and error signatures.
+8. **Dry-Run Hardening**:
+   - Simulated dry-run mode strictly prevents direct DDL execution and target database writes.
+9. **Linear Database Migration**: Created Alembic revision `016_add_verification_and_safety_controls.py` (`a4b5c6d7e8f9`).
 
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: A migration ETL process can report 100% completion while silently dropping rows, introducing orphaned foreign keys, or writing duplicate records. Furthermore, running destructive cleanups (`TRUNCATE`, `DROP TABLE`) without explicit version-bound user approvals creates catastrophic risk of data loss.
+- **Chosen Solution**:
+  - A deterministic 11-point verification suite guarantees physical and logical data correctness before declaring a migration completed.
+  - Verification failures feed back into Phase 3 recovery routing, enabling human intervention (`ASK_USER`) or agentic replanning without manual engineer triage.
+  - Tying destructive approvals strictly to `(plan_id, plan_version)` ensures an LLM replan or manual column mapping edit cannot execute destructive operations approved for an older blueprint.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Marking jobs completed immediately upon ETL worker exit**:
+  - _Rejected_: Silent data corruption (e.g. truncated strings, NULL foreign keys) is invisible until target applications fail in production.
+- **Alternative B: Blanket user approval for all future plan versions**:
+  - _Rejected_: If an LLM auto-heals an error by replacing an `INSERT` with a `TRUNCATE TABLE`, a persistent approval would allow catastrophic data loss without human review.
+
+### 4. Trade-offs & Future Considerations
+- Full-table hash comparisons on multi-terabyte datasets can be slow; sample-based validation and count matching provide an optimal balance between safety and throughput.

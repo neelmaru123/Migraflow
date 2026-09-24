@@ -5,8 +5,9 @@ retry policies, authoritative checkpoints, and stale step recovery.
 """
 
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 import uuid
+
 
 from sqlalchemy import and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -489,20 +490,20 @@ class ExecutionPlanService:
                     )
                     session.add(plan_event)
 
-                    # Update parent MigrationJob if still active
-                    stmt_job = select(MigrationJob).where(MigrationJob.id == exec_plan.migration_job_id)
-                    res_job = await session.execute(stmt_job)
-                    job = res_job.scalar_one_or_none()
-                    if job and job.status not in (
-                        ExecutionLifecycle.COMPLETED.value,
-                        ExecutionLifecycle.FAILED.value,
-                        ExecutionLifecycle.CANCELLED.value,
-                    ):
-                        job.status = (
-                            "dry_run_completed" if job.is_dry_run else ExecutionLifecycle.COMPLETED.value
-                        )
-                        job.completed_at = now
-                        job.progress = 100.0
+        # Phase 4 Verification Hook: On verify step, run deterministic verification
+        if step.step_type == ExecutionStepType.VERIFY.value or step.step_key == "verify":
+            from app.modules.execution.verification_services import VerificationCoordinator, VerificationStatus
+            exec_plan = step.execution_plan
+            if exec_plan and not exec_plan.job.is_dry_run if exec_plan.job else False:
+                v_verdict, v_results = await VerificationCoordinator.run_plan_verification(
+                    session=session,
+                    job_id=exec_plan.migration_job_id,
+                    step_id=step.id,
+                    verification_data=output_summary,
+                )
+                if v_verdict == VerificationStatus.FAILED:
+                    step.status = ExecutionStepLifecycle.FAILED.value
+                    logger.warning(f"Verify step '{step.step_key}' failed verification checks.")
 
         logger.info(f"Step '{step.step_key}' ({step.id}) completed successfully.")
         return step
@@ -963,3 +964,38 @@ class ExecutionPlanService:
         )
         res = await session.execute(stmt)
         return res.scalar_one_or_none()
+
+    @classmethod
+    async def list_verification_results(
+        cls,
+        session: AsyncSession,
+        job_id: uuid.UUID,
+    ) -> List[Any]:
+        """Fetches all durable verification results for an execution job, ordered by created_at."""
+        from app.modules.execution.execution_models import VerificationResult
+        stmt = (
+            select(VerificationResult)
+            .where(VerificationResult.migration_job_id == job_id)
+            .order_by(VerificationResult.created_at.asc())
+        )
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    @classmethod
+    async def run_job_verification(
+        cls,
+        session: AsyncSession,
+        job_id: uuid.UUID,
+        step_id: Optional[uuid.UUID] = None,
+        policy: Optional[Any] = None,
+        verification_data: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Any, List[Any]]:
+        """Executes verification suite for an execution job and persists results."""
+        from app.modules.execution.verification_services import VerificationCoordinator
+        return await VerificationCoordinator.run_plan_verification(
+            session=session,
+            job_id=job_id,
+            step_id=step_id,
+            policy=policy,
+            verification_data=verification_data,
+        )

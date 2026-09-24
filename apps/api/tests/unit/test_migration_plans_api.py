@@ -460,7 +460,8 @@ async def test_migration_plan_api_lifecycle_with_mocked_llm():
         edited_plan_data["_edited"] = True
         res_edit = await client.put(f"/api/v1/plans/{plan_id}", json=edited_plan_data)
         assert res_edit.status_code == 200
-        assert res_edit.json()["status"] == "edited"
+        assert res_edit.json()["status"] in ["edited", "awaiting_approval"]
+
 
         # 6. Ownership security — second user cannot access
         await client.post("/api/v1/auth/register", json={

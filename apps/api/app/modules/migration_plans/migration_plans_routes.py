@@ -24,11 +24,17 @@ from app.modules.migration_plans.migration_plans_schemas import (
     PlanVersionDetailResponse,
     PlanVersionListItem,
 )
+from app.modules.execution.execution_schemas import (
+    DestructiveApprovalRejectRequest,
+    DestructiveApprovalResponse,
+)
+from app.modules.execution.safety_services import DestructiveApprovalManager
 from app.modules.migration_plans.migration_plans_services import MigrationPlanService
 from app.modules.users.users_dependencies import get_current_active_user, get_current_user
 from app.modules.users.users_models import User
 
 router = APIRouter(prefix="/plans", tags=["Migration Plans & AI Generation"])
+
 
 
 def _to_plan_detail_response(plan) -> PlanDetailResponse:
@@ -440,4 +446,115 @@ async def restore_migration_plan_version(
         )
     restored_plan = await MigrationPlanService.restore_plan_version(session, plan, version_number)
     return _to_plan_detail_response(restored_plan)
+
+
+@router.get("/{plan_id}/destructive-approvals", response_model=List[DestructiveApprovalResponse])
+async def list_destructive_approvals(
+    plan_id: uuid.UUID,
+    include_invalid: bool = Query(default=False),
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """List all destructive operation approval records bound to this migration plan."""
+    plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
+    if not plan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Migration plan '{plan_id}' not found.",
+        )
+    if plan.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to view approvals for this migration plan.",
+        )
+    approvals = await DestructiveApprovalManager.list_approvals_for_plan(
+        session, plan_id, include_invalid=include_invalid
+    )
+    return approvals
+
+
+@router.post(
+    "/{plan_id}/destructive-approvals/{approval_id}/grant",
+    response_model=DestructiveApprovalResponse,
+)
+async def grant_destructive_approval(
+    plan_id: uuid.UUID,
+    approval_id: uuid.UUID,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Explicitly grant approval for a destructive operation (TRUNCATE, DROP, DELETE).
+    Binds the approval to the current plan version, user identity, and timestamp.
+    """
+    plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
+    if not plan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Migration plan '{plan_id}' not found.",
+        )
+    if plan.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to grant approvals for this migration plan.",
+        )
+    approval = await DestructiveApprovalManager.get_approval_by_id(session, approval_id)
+    if not approval or approval.migration_plan_id != plan_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Destructive operation approval '{approval_id}' not found for plan '{plan_id}'.",
+        )
+    try:
+        updated = await DestructiveApprovalManager.grant_approval(
+            session=session,
+            approval_id=approval_id,
+            user_id=current_user.id,
+        )
+        return updated
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post(
+    "/{plan_id}/destructive-approvals/{approval_id}/reject",
+    response_model=DestructiveApprovalResponse,
+)
+async def reject_destructive_approval(
+    plan_id: uuid.UUID,
+    approval_id: uuid.UUID,
+    payload: DestructiveApprovalRejectRequest,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Explicitly reject a destructive operation approval request with an explanation.
+    """
+    plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
+    if not plan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Migration plan '{plan_id}' not found.",
+        )
+    if plan.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to reject approvals for this migration plan.",
+        )
+    approval = await DestructiveApprovalManager.get_approval_by_id(session, approval_id)
+    if not approval or approval.migration_plan_id != plan_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Destructive operation approval '{approval_id}' not found for plan '{plan_id}'.",
+        )
+    try:
+        updated = await DestructiveApprovalManager.reject_approval(
+            session=session,
+            approval_id=approval_id,
+            user_id=current_user.id,
+            reason=payload.reason,
+        )
+        return updated
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
 

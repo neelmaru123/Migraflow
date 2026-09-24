@@ -52,6 +52,7 @@ class ExecutionStateMachine:
             ExecutionLifecycle.RECOVERING,
             ExecutionLifecycle.ASK_USER,
             ExecutionLifecycle.VERIFYING,
+            ExecutionLifecycle.NEEDS_REVIEW,
             ExecutionLifecycle.COMPLETED,
             ExecutionLifecycle.FAILED,
             ExecutionLifecycle.CANCELLED,
@@ -77,9 +78,17 @@ class ExecutionStateMachine:
         },
         ExecutionLifecycle.VERIFYING: {
             ExecutionLifecycle.COMPLETED,
+            ExecutionLifecycle.NEEDS_REVIEW,
             ExecutionLifecycle.FAILED,
             ExecutionLifecycle.ASK_USER,
             ExecutionLifecycle.RECOVERING,
+            ExecutionLifecycle.CANCELLED,
+        },
+        ExecutionLifecycle.NEEDS_REVIEW: {
+            ExecutionLifecycle.COMPLETED,
+            ExecutionLifecycle.RUNNING,
+            ExecutionLifecycle.ASK_USER,
+            ExecutionLifecycle.FAILED,
             ExecutionLifecycle.CANCELLED,
         },
         ExecutionLifecycle.COMPLETED: set(),  # Terminal state

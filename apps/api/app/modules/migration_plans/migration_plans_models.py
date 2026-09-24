@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from app.modules.users.users_models import User
     from app.modules.agents.agents_models import Agent
     from app.modules.metadata.metadata_models import MetadataSnapshot
-    from app.modules.execution.execution_models import MigrationJob
+    from app.modules.execution.execution_models import DestructiveOperationApproval, MigrationJob
 
 
 class MigrationPlanSnapshot(Base):
@@ -99,6 +99,11 @@ class MigrationPlan(Base):
         back_populates="plan",
         cascade="all, delete-orphan",
         order_by=lambda: desc(MigrationPlanVersion.version_number),
+    )
+    destructive_approvals: Mapped[List["DestructiveOperationApproval"]] = relationship(
+        "DestructiveOperationApproval",
+        back_populates="plan",
+        cascade="all, delete-orphan",
     )
 
 

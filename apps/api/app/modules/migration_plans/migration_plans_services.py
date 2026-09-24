@@ -744,6 +744,7 @@ class MigrationPlanService:
         from app.modules.migration_plans.migration_plans_engine.migration_plans_validator import (
             MigrationPlanValidator,
         )
+        from app.modules.execution.safety_services import DestructiveApprovalManager
 
         await MigrationPlanService._check_active_execution_lock(session, plan.id)
 
@@ -756,9 +757,14 @@ class MigrationPlanService:
             val_dict = val_res.model_dump(mode="json")
             plan.is_valid = val_res.is_valid
             plan.validation_errors = val_dict
-            plan.status = "edited" if val_res.is_valid else "invalid_edits"
+            plan.status = "awaiting_approval" if val_res.is_valid else "invalid_edits"
         else:
-            plan.status = "edited"
+            plan.status = "awaiting_approval"
+
+        # Approval Invalidation: manual edits revoke previous approval
+        plan.approved_version_number = None
+        plan.approved_by_user_id = None
+        plan.approved_at = None
 
         # Compute next version number and persist version snapshot
         stmt_ver = select(func.coalesce(func.max(MigrationPlanVersion.version_number), 0)).where(
@@ -778,6 +784,11 @@ class MigrationPlanService:
         )
         session.add(version_snapshot)
 
+        # Invalidate existing destructive approvals upon plan AST mutation
+        await DestructiveApprovalManager.invalidate_all_for_plan(
+            session, plan.id, f"Plan edited to version {next_ver}"
+        )
+
         await session.commit()
         return plan
 
@@ -792,6 +803,7 @@ class MigrationPlanService:
         from app.modules.migration_plans.migration_plans_engine.migration_plans_validator import (
             MigrationPlanValidator,
         )
+        from app.modules.execution.safety_services import DestructiveApprovalManager
 
         await MigrationPlanService._check_active_execution_lock(session, plan.id, ignore_job_id=ignore_job_id)
 
@@ -883,6 +895,11 @@ class MigrationPlanService:
             approved_at=None,
         )
         session.add(version_snapshot)
+
+        # Invalidate existing destructive approvals upon LLM refinement
+        await DestructiveApprovalManager.invalidate_all_for_plan(
+            session, plan.id, f"Plan refined to version {next_ver}"
+        )
 
         await session.commit()
         return plan

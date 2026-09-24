@@ -1339,19 +1339,118 @@ RecoveryRouter.evaluate()
    - If `fail`: Transitions job and step to `failed`.
    - Emits `USER_INTERVENTION_RESOLVED` event.
 
+### Phase G: Post-Migration Verification, Safety Controls, and Approval Integrity
+
+```
+                                  Migration Execution Loop
+                                             │
+                                             ↓
+                                 ETL Steps Completed (DAG)
+                                             │
+                                             ↓
+                                     Status: VERIFYING
+                                             │
+                                             ↓
+                                ┌─────────────────────────┐
+                                │   VerificationEngine    │
+                                └────────────┬────────────┘
+                                             │
+               ┌─────────────────────────────┼─────────────────────────────┐
+               ↓                             ↓                             ↓
+     [1] Row Count Comp.           [5] Primary Key Integ.        [9] Column / Type Comp.
+     [2] Processed Rows            [6] Foreign Key Integ.        [10] Trans. Sanity
+     [3] Failed Rows Threshold     [7] Nullability Check         [11] Sample Data Comp.
+     [4] Duplicate Detection       [8] Target Table Exists
+               │                             │                             │
+               └─────────────────────────────┼─────────────────────────────┘
+                                             │
+                                             ↓
+                                ┌─────────────────────────┐
+                                │ VerificationCoordinator │
+                                └────────────┬────────────┘
+                                             │
+               ┌─────────────────────────────┼─────────────────────────────┐
+               ↓                             ↓                             ↓
+         [All Passed]                [Minor Warning]             [Hard Check Failed]
+               │                             │                             │
+               │                   allow_warnings=False?                   │
+               │                   ┌─────────┴─────────┐                   │
+               │                   ↓                   ↓                   │
+               │              NEEDS_REVIEW         COMPLETED               │
+               │                                                           │
+               ↓                                                           ↓
+        Job: COMPLETED                                                Job: FAILED
+                                                                           │
+                                                                           ↓
+                                                                ClassifiedFailure
+                                                                (DATA_VALIDATION)
+                                                                           │
+                                                                           ↓
+                                                                 Phase 3 RecoveryRouter
+                                                                 (REPLAN / ASK_USER)
+```
+
+### Step 1: Deterministic Verification Execution
+1. **Triggering Verification**:
+   - As the final DAG step `verify` executes, or via manual API trigger (`POST /api/v1/executions/{id}/verify`), `VerificationCoordinator.run_plan_verification()` is invoked.
+   - The job state transitions from `RUNNING` $\to$ `VERIFYING`.
+2. **11 Standardized Checks**:
+   - `check_row_counts`: Verifies source count vs target count against `policy.row_count_tolerance_pct`.
+   - `check_rows_processed`: Checks that processed rows match source row counts.
+   - `check_failed_rows`: Enforces `max_failed_rows_allowed` limit.
+   - `check_duplicate_records`: Detects duplicate keys in target tables.
+   - `check_primary_key_integrity`: Ensures primary keys are non-null and strictly unique.
+   - `check_foreign_key_integrity`: Verifies child foreign keys exist in parent tables; flags orphaned references.
+   - `check_nullability`: Detects NULL values in columns designated NOT NULL.
+   - `check_target_table_existence`: Verifies physical target table creation.
+   - `check_schema_compatibility`: Checks expected columns and types against target database catalog.
+   - `check_transformation_sanity`: Validates required target columns are populated without corruption.
+   - `check_sample_data_comparison`: Compares sampled records between source and target for value parity.
+3. **Durable Result Persistence**:
+   - Persists every individual check as a `VerificationResult` record with `status` (`passed`, `failed`, `warning`, `skipped`), `expected`, `actual`, `tolerance`, and detailed JSON metadata.
+   - Emits `VERIFICATION_COMPLETED` audit event.
+
+### Step 2: Verification Failure & Recovery Loop Integration
+1. **Failure Cascade**:
+   - If critical checks fail, the job status transitions to `FAILED` (never `COMPLETED`).
+   - The coordinator constructs a `ClassifiedFailure` (`DATA_VALIDATION`, code `ERR_POST_MIGRATION_VERIFICATION_FAILED`).
+   - Feeds the failure directly into the Phase 3 `RecoveryRouter`, triggering automatic self-healing replanning (`REPLAN`) or presenting clear human options (`ASK_USER`).
+2. **Review Mode**:
+   - If warnings are encountered and `policy.allow_warnings = False`, the job transitions to `NEEDS_REVIEW`, halting automated handoff until explicit human confirmation.
+
+### Step 3: Safety Classification & Destructive Operation Governance
+1. **Safety Tiers**:
+   - `SafetyClassifier` tags statements as `READ_ONLY`, `WRITE`, or `DESTRUCTIVE` (e.g., `DROP TABLE`, `TRUNCATE`, `DELETE FROM`, `CASCADE`, `ALTER TABLE ... DROP COLUMN`).
+2. **Strict Approval Binding**:
+   - Any destructive operation requires an explicit `DestructiveOperationApproval` record bound strictly to:
+     `plan_id`, `plan_version_number`, `target_table`, `operation_type`, `approved_by_user_id`, and timestamp.
+3. **Invalidation on Plan Modification or Replan**:
+   - Whenever a plan AST is edited (`PUT /api/v1/plans/{id}`) or refined by the LLM (`replan_execution_failure`), `DestructiveApprovalManager.invalidate_all_for_plan()` marks all prior approvals as `is_valid = False`.
+   - Execution jobs cannot start until the human explicitly re-approves destructive actions on the new version.
+4. **Approval REST Endpoints**:
+   - `GET /api/v1/plans/{plan_id}/destructive-approvals`: List pending and active approvals.
+   - `POST /api/v1/plans/{plan_id}/destructive-approvals/{approval_id}/grant`: Explicitly grant approval.
+   - `POST /api/v1/plans/{plan_id}/destructive-approvals/{approval_id}/reject`: Explicitly reject approval with reason.
+
+### Step 4: Credential Boundary & Security Hardening
+1. **`CredentialSanitizer`**:
+   - Intercepts connection URIs (`postgresql://user:pass@host`), assignment patterns (`password=...`, `token=...`), Bearer tokens, and private keys.
+   - Traverses nested dictionary structures and event payloads to redact secrets.
+   - Hardens AI diagnosis context: strictly strips raw database rows (`<N rows redacted for security>`), guaranteeing zero customer data leakage to LLM providers.
+
 ## 3. Impact & Delta Analysis
-- **[NEW]**: [`apps/api/app/modules/execution/failure_taxonomy.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/failure_taxonomy.py) — Centralized failure taxonomy, `ClassifiedFailure`, and rule-based `FailureClassifier`.
-- **[NEW]**: [`apps/api/app/modules/execution/recovery_router.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/recovery_router.py) — Deterministic recovery router with anti-infinite loop guards and safety checks.
-- **[NEW]**: [`apps/api/app/modules/execution/agentic_replan_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/agentic_replan_services.py) — Sanitized LangGraph replanning pipeline and approval invalidation engine.
-- **[NEW]**: [`apps/api/alembic/versions/015_add_failure_classification_interventions_and_governance.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/alembic/versions/015_add_failure_classification_interventions_and_governance.py) — Linear database migration adding `user_interventions`, counters, and plan approval governance columns.
-- **[NEW]**: [`apps/api/tests/unit/test_phase3_failure_classification_and_recovery.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_phase3_failure_classification_and_recovery.py) — 7 comprehensive unit tests for taxonomy, router decisions, loop bounds, intervention lifecycle, and approval governance.
-- **[MODIFIED]**: [`apps/api/app/core/state.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/core/state.py) — Added `FailureCategory`, `FailureSeverity`, `FailureDomain`, `RecoveryDecisionType`, `ASK_USER` states, and replan/intervention event constants.
-- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_models.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_models.py) — Added `UserIntervention` model and tracking counters on `MigrationExecutionPlan` and `MigrationExecutionStep`.
-- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_models.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_models.py) — Added approval governance columns and disambiguated foreign keys.
-- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_plan_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_plan_services.py) — Integrated failure classification, recovery routing, and intervention management into step failure handling.
-- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py) — Exposed intervention listing and response endpoints.
-- **[MODIFIED]**: [`apps/api/tests/unit/test_alembic_migrations.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_alembic_migrations.py) — Updated expected migration DAG head to `f3a4b5c6d7e8`.
-
-
-
-
+- **[NEW]**: [`apps/api/app/modules/execution/verification_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/verification_services.py) — 11 deterministic verification checks, `VerificationPolicy`, and `VerificationCoordinator`.
+- **[NEW]**: [`apps/api/app/modules/execution/safety_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/safety_services.py) — Operation risk tiering (`SafetyClassifier`) and version-bound destructive approval manager (`DestructiveApprovalManager`).
+- **[NEW]**: [`apps/api/app/core/credential_sanitizer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/core/credential_sanitizer.py) — Centralized credential scrubber and raw data row redaction guard.
+- **[NEW]**: [`apps/api/alembic/versions/016_add_verification_and_safety_controls.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/alembic/versions/016_add_verification_and_safety_controls.py) — Linear database migration adding `verification_results` and `destructive_operation_approvals` tables.
+- **[NEW]**: [`apps/api/tests/unit/test_phase4_verification_safety_and_approvals.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_phase4_verification_safety_and_approvals.py) — 21 unit tests covering verification checks, coordinator lifecycles, safety classifiers, approval invalidation, and credential redaction.
+- **[MODIFIED]**: [`apps/api/app/core/state.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/core/state.py) — Added `NEEDS_REVIEW` state, `VerificationStatus`, `VerificationCheckType`, `OperationRiskLevel`, and verification/safety event types.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_state_machine.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_state_machine.py) — Registered transitions for `VERIFYING` and `NEEDS_REVIEW`.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_models.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_models.py) — Added `VerificationResult` and `DestructiveOperationApproval` models and relationships.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_schemas.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_schemas.py) — Added verification and destructive approval DTOs.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py) — Exposed verification results retrieval and manual run trigger routes.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py) — Exposed destructive approval listing, grant, and reject endpoints.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py) — Gated execution job creation against unapproved destructive operations.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py) — Invalided destructive approvals on plan AST edit and refinement.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/agentic_replan_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/agentic_replan_services.py) — Invalidated approvals upon agentic replan execution.
+- **[MODIFIED]**: [`apps/api/tests/unit/test_alembic_migrations.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_alembic_migrations.py) — Updated expected DAG head to `a4b5c6d7e8f9`.

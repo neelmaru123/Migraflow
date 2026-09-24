@@ -27,6 +27,8 @@ from app.modules.execution.execution_schemas import (
     ExecutionStepResponse,
     UserInterventionRespondRequest,
     UserInterventionResponse,
+    VerificationResultResponse,
+    VerificationRunRequest,
 )
 from app.modules.execution.execution_services import ExecutionService
 from app.modules.users.users_models import User
@@ -394,3 +396,47 @@ async def respond_to_intervention(
         action=body.action,
         response_data=body.response_data,
     )
+
+
+@execution_router.get(
+    "/executions/{id}/verifications",
+    response_model=List[VerificationResultResponse],
+    summary="List all post-migration verification results for an execution job",
+)
+async def list_job_verifications(
+    id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """Lists durable verification check results for an execution job."""
+    from app.modules.execution.execution_plan_services import ExecutionPlanService
+    return await ExecutionPlanService.list_verification_results(session=session, job_id=id)
+
+
+@execution_router.post(
+    "/executions/{id}/verify",
+    response_model=List[VerificationResultResponse],
+    summary="Trigger post-migration verification suite for an execution job",
+)
+async def run_job_verification(
+    id: UUID,
+    body: VerificationRunRequest = VerificationRunRequest(),
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """Manually executes or re-evaluates the verification suite for an execution job."""
+    from app.modules.execution.execution_plan_services import ExecutionPlanService
+    from app.modules.execution.verification_services import VerificationPolicy
+    policy = VerificationPolicy(
+        allow_warnings=body.allow_warnings,
+        row_count_tolerance_pct=body.row_count_tolerance_pct,
+        max_failed_rows_allowed=body.max_failed_rows_allowed,
+    )
+    verdict, results = await ExecutionPlanService.run_job_verification(
+        session=session,
+        job_id=id,
+        policy=policy,
+        verification_data=body.verification_data,
+    )
+    return results
+

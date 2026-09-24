@@ -97,6 +97,9 @@ class MigrationJob(Base):
     interventions: Mapped[List["UserIntervention"]] = relationship(
         "UserIntervention", back_populates="job", cascade="all, delete-orphan", order_by="UserIntervention.created_at"
     )
+    verification_results: Mapped[List["VerificationResult"]] = relationship(
+        "VerificationResult", back_populates="job", cascade="all, delete-orphan", order_by="VerificationResult.created_at"
+    )
 
 
 class AgentRun(Base):
@@ -215,6 +218,12 @@ class MigrationExecutionPlan(Base):
         cascade="all, delete-orphan",
         order_by="MigrationExecutionStep.sequence",
     )
+    verification_results: Mapped[List["VerificationResult"]] = relationship(
+        "VerificationResult",
+        back_populates="execution_plan",
+        cascade="all, delete-orphan",
+        order_by="VerificationResult.created_at",
+    )
 
 
 class MigrationExecutionStep(Base):
@@ -318,6 +327,9 @@ class MigrationExecutionStep(Base):
     )
     interventions: Mapped[List["UserIntervention"]] = relationship(
         "UserIntervention", back_populates="step", cascade="all, delete-orphan"
+    )
+    verification_results: Mapped[List["VerificationResult"]] = relationship(
+        "VerificationResult", back_populates="step"
     )
 
 
@@ -536,4 +548,141 @@ class UserIntervention(Base):
     resolved_by: Mapped[Optional["User"]] = relationship(
         "User", foreign_keys=[resolved_by_user_id]
     )
+
+
+class VerificationResult(Base):
+    """
+    Durable post-migration verification result record.
+    Tracks granular checks (row count, duplicates, constraints, schema compatibility, sample comparison).
+    """
+    __tablename__ = "verification_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    migration_job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("migration_jobs.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    execution_plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("migration_execution_plans.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    execution_step_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("migration_execution_steps.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
+    )
+    check_type: Mapped[str] = mapped_column(
+        String(100), index=True, nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), index=True, nullable=False
+    )  # passed, failed, warning, skipped
+    target_table: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
+    )
+    expected: Mapped[Optional[Any]] = mapped_column(
+        JSON_TYPE, nullable=True
+    )
+    actual: Mapped[Optional[Any]] = mapped_column(
+        JSON_TYPE, nullable=True
+    )
+    tolerance: Mapped[float] = mapped_column(
+        Float, default=0.0, nullable=False
+    )
+    details: Mapped[Dict[str, Any]] = mapped_column(
+        JSON_TYPE, default=dict, nullable=False
+    )
+    error_message: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    # Relationships
+    job: Mapped["MigrationJob"] = relationship("MigrationJob", back_populates="verification_results")
+    execution_plan: Mapped["MigrationExecutionPlan"] = relationship("MigrationExecutionPlan", back_populates="verification_results")
+    step: Mapped[Optional["MigrationExecutionStep"]] = relationship("MigrationExecutionStep", back_populates="verification_results")
+
+
+class DestructiveOperationApproval(Base):
+    """
+    Explicit, cryptographically/structurally bound approval for destructive database operations
+    (truncate target, drop table, cascade delete).
+    Bound strictly to exact (migration_plan_id, plan_version_number).
+    Invalidated automatically if plan is edited or replanned.
+    """
+    __tablename__ = "destructive_operation_approvals"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    migration_plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("migration_plans.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    plan_version_number: Mapped[int] = mapped_column(
+        Integer, nullable=False
+    )
+    target_table: Mapped[str] = mapped_column(
+        String(255), nullable=False
+    )
+    operation_type: Mapped[str] = mapped_column(
+        String(100), nullable=False
+    )  # truncate, drop_table, delete_data, cascade_drop
+    risk_level: Mapped[str] = mapped_column(
+        String(50), default="destructive", nullable=False
+    )
+    approved_by_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    is_approved: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    is_valid: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
+    approved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rejection_reason: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True
+    )
+    metadata_snapshot: Mapped[Optional[Dict[str, Any]]] = mapped_column(
+        JSON_TYPE, nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    # Relationships
+    plan: Mapped["MigrationPlan"] = relationship("MigrationPlan", back_populates="destructive_approvals")
+    approved_by: Mapped[Optional["User"]] = relationship(
+        "User", foreign_keys=[approved_by_user_id]
+    )
+
 
