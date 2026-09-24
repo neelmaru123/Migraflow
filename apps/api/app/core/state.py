@@ -299,12 +299,87 @@ class ExecutionEventType(str, Enum):
     DESTRUCTIVE_APPROVAL_REVOKED = "DESTRUCTIVE_APPROVAL_REVOKED"
     DESTRUCTIVE_APPROVAL_REJECTED = "DESTRUCTIVE_APPROVAL_REJECTED"
 
+    # Observability & Budget Events
+    TRACE_STARTED = "TRACE_STARTED"
+    TRACE_COMPLETED = "TRACE_COMPLETED"
+    LLM_CALL_RECORDED = "LLM_CALL_RECORDED"
+    BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
+    TIMEOUT_TRIGGERED = "TIMEOUT_TRIGGERED"
+
     # Agent Lifecycle Events
     AGENT_REGISTERED = "AGENT_REGISTERED"
     AGENT_CONNECTED = "AGENT_CONNECTED"
     AGENT_DISCONNECTED = "AGENT_DISCONNECTED"
     AGENT_STATUS_CHANGED = "AGENT_STATUS_CHANGED"
     AGENT_HEARTBEAT = "AGENT_HEARTBEAT"
+
+
+class TraceOperationType(NormalizedStrEnum):
+    """
+    Standardized operation categories for hierarchical execution tracing.
+    AgentRun -> ExecutionStep -> ToolRun / LLMRun
+    """
+    AGENT_RUN = "agent_run"
+    NODE_RUN = "node_run"
+    EXECUTION_STEP = "execution_step"
+    TOOL_RUN = "tool_run"
+    LLM_RUN = "llm_run"
+    VERIFICATION = "verification"
+    ETL_CHUNK = "etl_chunk"
+    DDL_EXECUTION = "ddl_execution"
+
+
+class TraceStatus(NormalizedStrEnum):
+    """
+    Status of a trace span within the hierarchical execution tree.
+    """
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
+
+
+class BudgetLimitType(NormalizedStrEnum):
+    """
+    Resource budget categories deterministically enforced on migrations.
+    """
+    MAX_LLM_CALLS = "max_llm_calls"
+    MAX_REPLANS = "max_replans"
+    MAX_RETRIES = "max_retries"
+    MAX_EXECUTION_DURATION_SECONDS = "max_execution_duration_seconds"
+    MAX_CONCURRENT_STEPS = "max_concurrent_steps"
+    MAX_TOKENS = "max_tokens"
+    MAX_COST_USD = "max_cost_usd"
+
+
+class BudgetExceededError(ValueError):
+    """
+    Domain exception raised when a deterministic resource budget is exceeded.
+    """
+    def __init__(self, limit_type: str, limit_value: Any, current_value: Any, entity_id: Optional[str] = None):
+        self.limit_type = limit_type
+        self.limit_value = limit_value
+        self.current_value = current_value
+        self.entity_id = entity_id
+        super().__init__(
+            f"Resource budget exceeded for {limit_type}: limit={limit_value}, current={current_value}"
+            + (f" on entity '{entity_id}'" if entity_id else "")
+        )
+
+
+class ExecutionTimeoutError(TimeoutError):
+    """
+    Domain exception raised when an execution, LLM, or verification timeout policy fires.
+    """
+    def __init__(self, operation_type: str, timeout_seconds: float, entity_id: Optional[str] = None):
+        self.operation_type = operation_type
+        self.timeout_seconds = timeout_seconds
+        self.entity_id = entity_id
+        super().__init__(
+            f"Operation '{operation_type}' timed out after {timeout_seconds}s"
+            + (f" on entity '{entity_id}'" if entity_id else "")
+        )
 
 
 class InvalidStateTransitionError(ValueError):
@@ -329,3 +404,4 @@ class InvalidStateTransitionError(ValueError):
         if reason:
             message += f" Reason: {reason}"
         super().__init__(message)
+

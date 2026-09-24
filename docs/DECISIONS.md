@@ -2205,3 +2205,70 @@ Implemented comprehensive post-migration verification, safety classification, an
 
 ### 4. Trade-offs & Future Considerations
 - Full-table hash comparisons on multi-terabyte datasets can be slow; sample-based validation and count matching provide an optimal balance between safety and throughput.
+
+---
+
+## [2026-09-24] - Phase 5: Production Observability, Tracing, Budgets and Operational Controls
+
+### 1. Decision Summary
+Implemented a production-grade, internal observability and operational control model with OpenTelemetry export compatibility:
+1. **Hierarchical Execution Tracing Model (`ExecutionTracer`)**:
+   - Structured three-tier hierarchy: `AgentRun` $\to$ `ExecutionStep` / `NodeRun` $\to$ `ToolRun` / `LLMRun` / `Verification`.
+   - Durable spans persisted in `execution_traces` table with `run_id`, `trace_id`, self-referential `parent_run_id`, `operation_type`, `started_at`, `finished_at`, `duration_ms`, `status`, `error_type`, `error_message`, and sanitized `metadata_snapshot`.
+   - Built-in `to_otel_span()` serialization compliant with OpenTelemetry Span specifications.
+   - Trace tree reconstruction via `ExecutionTracer.get_trace_tree()` for UI visual flamegraphs.
+2. **Comprehensive LLM Observability & Provenance (`LLMTracker`)**:
+   - Durable invocation recording in `llm_call_records` table capturing: model, provider, prompt_version, latency_ms, token usage (prompt, completion, total), estimated cost (USD), success/failure status, structured output validation flag, and sanitized prompt preview.
+   - Guaranteed zero credential and raw data leakage: masks passwords, connection URIs, authorization headers, and bearer tokens.
+3. **Prompt & Model Versioning / Plan Provenance**:
+   - Every AI planning decision binds `ai_model`, `model_version`, `prompt_version`, `planner_version`, and `schema_version`.
+   - Added REST endpoint `/api/v1/observability/plans/{plan_id}/provenance` to authoritatively answer: *"Which model/prompt generated this migration plan?"*.
+4. **Deterministic Resource Budget Enforcement (`ResourceBudgetManager`)**:
+   - Governed via `resource_budgets` database table with configurable limits:
+     - `max_llm_calls` (default: 10)
+     - `max_replans` (default: 3)
+     - `max_retries` (default: 3)
+     - `max_execution_duration_seconds` (default: 3600)
+     - `max_concurrent_steps` (default: 4)
+     - `max_tokens` (default: 100,000)
+     - `max_cost_usd` (default: $5.00)
+   - Evaluated by deterministic Python logic raising `BudgetExceededError` immediately upon breach. Never trusts LLMs to self-police.
+5. **Explicit Platform Timeout Policies (`TimeoutPolicy`)**:
+   - Enforced centralized operational timeouts to prevent thread hanging or resource starvation:
+     - LLM calls: 60.0s
+     - DB connections: 10.0s
+     - Metadata inspection: 120.0s
+     - Migration execution step: 600.0s
+     - Post-migration verification: 180.0s
+     - Whole migration job: 7200.0s (2 hrs)
+     - Agent communication: 30.0s
+   - Async execution wrapper `execute_with_timeout` raising `ExecutionTimeoutError`.
+6. **Credential-Safe Structured Logging (`StructuredLogger`)**:
+   - Injects correlation context (`migration_job_id`, `agent_run_id`, `execution_step_id`, `trace_id`) into every log record.
+   - Real-time scrubbing of connection strings, API tokens, passwords, and sensitive keys.
+7. **Actionable Platform Metrics (`ObservabilityMetricsService`)**:
+   - Real-time aggregations: jobs started, completed, failed, cancelled; average step duration; total retries, recoveries, replans; verification failures; agent availability ratio; LLM token counts and estimated AI cost.
+8. **Operational Health Decoupling (`OperationalHealthService`)**:
+   - Strictly separated **Agent Health** (container uptime, ping freshness, status) from **Job Health** (DAG step state, error rates, failed rows).
+   - An online agent does not imply healthy jobs; a failed job does not mark the host agent as unhealthy.
+9. **Linear Database Migration**:
+   - Created Alembic revision `017_add_observability_tracing_and_budgets.py` (`b5c6d7e8f9a0`, downstream of `a4b5c6d7e8f9`).
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Enterprise production migrations need granular auditing, token/cost budgets, deterministic timeouts, and root-cause tracing without leaking customer passwords or introducing external dependency bloat like full Datadog/NewRelic agent sidecars.
+- **Chosen Solution**:
+  - Native internal relational tracing model with OpenTelemetry export compatibility provides zero external runtime requirements while ensuring future OTel collector bridge readiness.
+  - Hard deterministic Python limits on token and cost spend prevent runaway AI loops.
+  - Decoupling Agent health from Job health prevents cascading false alerts and provides precise operational visibility.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Relying on heavyweight external APM agents (Datadog/Dynatrace)**:
+  - _Rejected_: Introduces heavy vendor lock-in, external network requirements, and significant operational complexity for on-premise air-gapped agent deployments.
+- **Alternative B: Allowing the LLM to inspect and limit its own budget**:
+  - _Rejected_: LLMs in looping or hallucinating failure states cannot be trusted to respect call or token limits. Deterministic code enforcement is mandatory.
+- **Alternative C: Coupling Agent online status with Job success**:
+  - _Rejected_: Causes false positives where healthy worker nodes are restarted due to SQL schema mismatches, or failed worker containers mask silent database deadlocks.
+
+### 4. Trade-offs & Future Considerations
+- Internal trace tables grow with large migrations; retention/pruning policies (e.g., 30-day archival) will be scheduled in future operational maintenance cron jobs.
+

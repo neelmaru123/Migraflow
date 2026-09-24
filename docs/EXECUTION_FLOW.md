@@ -1454,3 +1454,137 @@ RecoveryRouter.evaluate()
 - **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py) — Invalided destructive approvals on plan AST edit and refinement.
 - **[MODIFIED]**: [`apps/api/app/modules/execution/agentic_replan_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/agentic_replan_services.py) — Invalidated approvals upon agentic replan execution.
 - **[MODIFIED]**: [`apps/api/tests/unit/test_alembic_migrations.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_alembic_migrations.py) — Updated expected DAG head to `a4b5c6d7e8f9`.
+
+---
+
+# Execution Flow — Phase 5: Production Observability, Tracing, Budgets and Operational Controls
+
+## 1. Entry Points
+- **Tracing & Flamegraph Tree**:
+  - `GET /api/v1/observability/traces/{trace_id}/tree`
+  - `GET /api/v1/observability/jobs/{job_id}/traces`
+- **LLM Provenance & Audit**:
+  - `GET /api/v1/observability/llm-calls`
+  - `GET /api/v1/observability/plans/{plan_id}/provenance`
+- **Resource Budgets**:
+  - `GET /api/v1/observability/budgets/{job_id}`
+  - `PUT /api/v1/observability/budgets/{job_id}`
+- **Operational Metrics & Decoupled Health**:
+  - `GET /api/v1/observability/metrics`
+  - `GET /api/v1/observability/health`
+
+## 2. Step-by-Step Execution Sequence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client as UI / Operator
+    participant API as Observability Router
+    participant Tracer as ExecutionTracer
+    participant LLM as LLMTracker
+    participant Budget as ResourceBudgetManager
+    participant Health as OperationalHealthService
+    participant DB as PostgreSQL / SQLite
+
+    Note over Client, Tracer: 1. Hierarchical Execution Tracing
+    Client->>Tracer: span("AgentRun", operation_type=AGENT_RUN)
+    Tracer->>DB: INSERT into execution_traces (parent_run_id=None, trace_id=span_id)
+    Tracer->>Tracer: span("NodeRun", operation_type=NODE_RUN, parent=root)
+    Tracer->>DB: INSERT into execution_traces (parent_run_id=root.id, trace_id=root.trace_id)
+    Tracer->>Tracer: span("ToolRun", operation_type=TOOL_RUN, parent=step)
+    Tracer->>DB: INSERT into execution_traces (parent_run_id=step.id, trace_id=root.trace_id)
+    Tracer->>Tracer: finish_span(status=COMPLETED, duration_ms)
+    Tracer->>DB: UPDATE execution_traces finished_at, duration_ms, status
+
+    Note over Client, Budget: 2. Deterministic Resource Budget Enforcement
+    Client->>Budget: record_usage(job_id, llm_calls=1, tokens=1200, cost_usd=0.015)
+    Budget->>DB: SELECT resource_budgets WHERE job_id
+    alt Usage > Limits (e.g. max_llm_calls, max_tokens, max_cost_usd)
+        Budget-->>Client: RAISE BudgetExceededError(limit_type, limit_val, curr_val)
+        Budget->>DB: INSERT ExecutionEvent(BUDGET_EXCEEDED)
+    else Usage <= Limits
+        Budget->>DB: UPDATE resource_budgets counters
+    end
+
+    Note over Client, LLM: 3. LLM Call Recording & Secret Sanitization
+    Client->>LLM: record_llm_call(model="gpt-4o", prompt="...", tokens=1250)
+    LLM->>LLM: CredentialSanitizer.mask_credentials(prompt)
+    LLM->>LLM: estimate_cost(provider, prompt_tokens, completion_tokens)
+    LLM->>DB: INSERT into llm_call_records
+    LLM->>Budget: record_usage(job_id, llm_calls=1, tokens, cost)
+
+    Note over Client, Health: 4. Decoupled Operational Health Evaluation
+    Client->>API: GET /api/v1/observability/health
+    API->>Health: evaluate_health(session)
+    Health->>DB: Query agents table (last_seen_at >= now - 60s)
+    Health->>DB: Query migration_jobs table (recent active/failed jobs)
+    Note over Health: Agent Health (Online) != Job Health (Degraded/Failed)
+    Health-->>Client: OperationalHealthResponse(agent_health_summary, job_health_summary)
+```
+
+### Detailed Flow Specifications
+
+### Step 1: Hierarchical Trace Propagation & Tree Reconstruction
+1. **Span Context**:
+   - `ExecutionTracer.start_span()` assigns `span_id = uuid.uuid4()`.
+   - If `parent_run_id` is passed, `trace_id` is automatically inherited from the parent span.
+   - If no parent is passed, `trace_id` defaults to `span_id` (forming the root of the distributed trace).
+   - Metadata is passed through `CredentialSanitizer.sanitize_structure()`, strictly scrubbing passwords, tokens, and authorization headers.
+2. **Context Manager Guard**:
+   - `async with ExecutionTracer.span(...) as span:` captures start time, calculates `duration_ms` on exit, and intercepts unhandled exceptions to record `error_type` and sanitized `error_message`, setting status to `FAILED`.
+3. **OpenTelemetry Mapping**:
+   - `span.to_otel_span()` serializes internal traces directly into OpenTelemetry Span dictionaries (`name`, `context.trace_id`, `context.span_id`, `parent_id`, `attributes`, `status.code`).
+4. **Tree Reconstruction**:
+   - `ExecutionTracer.get_trace_tree(trace_id)` executes an indexed self-referential tree traversal, returning a nested `TraceTreeResponse` with child spans and OpenTelemetry payloads for visual inspection.
+
+### Step 2: LLM Observability & Provenance Tracking
+1. **Invocation Record**:
+   - `LLMTracker.record_llm_call()` captures model, provider, prompt_version, planner_version, latency_ms, token counts, and structured output validation.
+2. **Pricing Estimation**:
+   - Deterministic provider pricing tiers estimate spend (USD) per 1,000 tokens for OpenAI, Anthropic, Google, and local fallbacks.
+3. **Plan Provenance**:
+   - `get_plan_provenance(plan_id)` extracts exact model, model_version, prompt_version, planner_version, and schema_version from the approved plan blueprint, definitively answering *"Which model/prompt generated this migration plan?"*.
+
+### Step 3: Deterministic Resource Budget Enforcement
+1. **Durable Budgets**:
+   - `ResourceBudget` records store job limits: `max_llm_calls`, `max_replans`, `max_retries`, `max_execution_duration_seconds`, `max_concurrent_steps`, `max_tokens`, `max_cost_usd`.
+2. **Deterministic Evaluation**:
+   - `ResourceBudgetManager.record_usage()` increments live counters and immediately evaluates against hard limits in Python code.
+   - If any limit is breached, it immediately sets `is_exceeded = True`, emits a `BUDGET_EXCEEDED` event, and raises `BudgetExceededError`. The platform never relies on the LLM to self-police.
+
+### Step 4: Explicit Operational Timeouts
+1. **Timeout Standards**:
+   - `TimeoutPolicy` declares centralized limits: LLM calls (60s), DB connections (10s), Metadata inspection (120s), Steps (600s), Verification (180s), Jobs (7200s), Communication (30s).
+2. **Async Guard**:
+   - `execute_with_timeout(coro, timeout_seconds, operation_type)` wraps operations in `asyncio.wait_for`.
+   - On timeout expiry, it logs the timeout and raises `ExecutionTimeoutError`.
+
+### Step 5: Credential-Safe Structured Logging
+1. **Correlation Context**:
+   - `StructuredLogger` leverages Python `contextvars` to correlate `migration_job_id`, `agent_run_id`, `execution_step_id`, and `trace_id` automatically across async coroutines.
+2. **Automatic Scrubbing**:
+   - Every log message and extra payload is passed through `CredentialSanitizer`, redacting connection URIs, Bearer tokens, and sensitive key values (`password`, `token`, `secret`).
+
+### Step 6: Operational Health Separation
+1. **Decoupled Evaluation**:
+   - `OperationalHealthService.evaluate_health()` evaluates agent container availability and recent heartbeats (`last_seen_at >= now - 60s`).
+   - Simultaneously evaluates active migration job statuses and error rates.
+   - Outputs separate health verdicts: an online agent hosting a failed job reports `agent_health = HEALTHY` and `job_health = DEGRADED/UNHEALTHY`.
+
+## 3. Impact & Delta Analysis
+- **[NEW]**: [`apps/api/app/modules/observability/observability_models.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/observability/observability_models.py) — Models for `ExecutionTrace` (with OTel exporter), `LLMCallRecord`, and `ResourceBudget`.
+- **[NEW]**: [`apps/api/app/modules/observability/observability_schemas.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/observability/observability_schemas.py) — DTO schemas for traces, trace trees, LLM records, budgets, metrics, health, and plan provenance.
+- **[NEW]**: [`apps/api/app/modules/observability/tracer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/observability/tracer.py) — Hierarchical `ExecutionTracer` with `start_span`, `finish_span`, async context manager `span()`, and tree reconstruction.
+- **[NEW]**: [`apps/api/app/modules/observability/llm_tracker.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/observability/llm_tracker.py) — `LLMTracker` for AI call tracking, token/cost estimation, prompt preview scrubbing, and budget incrementing.
+- **[NEW]**: [`apps/api/app/modules/observability/budget_manager.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/observability/budget_manager.py) — `ResourceBudgetManager` for hard deterministic limits enforcement raising `BudgetExceededError`.
+- **[NEW]**: [`apps/api/app/modules/observability/timeout_policy.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/observability/timeout_policy.py) — `TimeoutPolicy` constants and `execute_with_timeout` async execution wrapper.
+- **[NEW]**: [`apps/api/app/modules/observability/structured_logger.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/observability/structured_logger.py) — Context-aware `StructuredLogger` with correlation IDs and credential masking.
+- **[NEW]**: [`apps/api/app/modules/observability/health_service.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/observability/health_service.py) — `OperationalHealthService` decoupling Agent health from Job health.
+- **[NEW]**: [`apps/api/app/modules/observability/metrics_service.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/observability/metrics_service.py) — `ObservabilityMetricsService` computing real-time operational metrics.
+- **[NEW]**: [`apps/api/app/modules/observability/observability_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/observability/observability_routes.py) — REST endpoints for traces, trace trees, LLM records, budgets, metrics, operational health, and plan provenance.
+- **[NEW]**: [`apps/api/alembic/versions/017_add_observability_tracing_and_budgets.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/alembic/versions/017_add_observability_tracing_and_budgets.py) — Linear database migration (`b5c6d7e8f9a0`, revises `a4b5c6d7e8f9`).
+- **[NEW]**: [`apps/api/tests/unit/test_phase5_observability_tracing_budgets.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_phase5_observability_tracing_budgets.py) — 11 comprehensive unit tests validating trace propagation, OTel export, LLM tracking, budget enforcement, timeouts, logging, and health decoupling.
+- **[MODIFIED]**: [`apps/api/app/core/state.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/core/state.py) — Added `TraceOperationType` (including `NODE_RUN`), `TraceStatus`, `BudgetLimitType`, observability event types, and exceptions (`BudgetExceededError`, `ExecutionTimeoutError`).
+- **[MODIFIED]**: [`apps/api/app/main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/main.py) — Registered `observability_router` under `/api/v1` and loaded `observability_models`.
+- **[MODIFIED]**: [`apps/api/tests/unit/test_alembic_migrations.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_alembic_migrations.py) — Updated expected migration head to `b5c6d7e8f9a0`.
+

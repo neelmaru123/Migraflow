@@ -16,6 +16,7 @@ from app.modules.agents.agents_services import AgentService
 from app.modules.execution.execution_routes import execution_router
 from app.modules.metadata.metadata_routes import router as metadata_router
 from app.modules.migration_plans.migration_plans_routes import router as migration_plans_router
+from app.modules.observability.observability_routes import router as observability_router
 from app.modules.sources.sources_routes import router as sources_router
 from app.modules.users.users_routes import router as users_router
 
@@ -23,9 +24,11 @@ from app.modules.users.users_routes import router as users_router
 import app.modules.agents.agents_models  # noqa: F401
 import app.modules.execution.execution_models  # noqa: F401
 import app.modules.metadata.metadata_models  # noqa: F401
+import app.modules.observability.observability_models  # noqa: F401
 import app.modules.sources.sources_models  # noqa: F401
 import app.modules.migration_plans.migration_plans_models  # noqa: F401
 import app.modules.users.users_models  # noqa: F401
+
 
 
 async def stale_agent_watchdog():
@@ -77,6 +80,8 @@ app.include_router(execution_router, prefix=settings.API_V1_STR)
 app.include_router(agents_router, prefix=settings.API_V1_STR)
 app.include_router(metadata_router, prefix=settings.API_V1_STR)
 app.include_router(migration_plans_router, prefix=settings.API_V1_STR)
+app.include_router(observability_router, prefix=settings.API_V1_STR)
+
 
 # CORS Middleware Setup
 if "*" in settings.CORS_ORIGINS:
