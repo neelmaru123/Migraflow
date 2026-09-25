@@ -697,13 +697,17 @@ class AgentService:
 
         for agent, effective_threshold in stale_agents:
             # Keep agent online if job is actively reporting progress AND agent was seen recently
-            stmt_active_job = select(MigrationJob).where(
-                MigrationJob.agent_id == agent.id,
-                MigrationJob.status.in_(["running", "preparing"]),
-                MigrationJob.updated_at >= active_cutoff,
+            stmt_active_job = (
+                select(MigrationJob)
+                .where(
+                    MigrationJob.agent_id == agent.id,
+                    MigrationJob.status.in_(["running", "preparing", "verifying", "recovering", "claimed"]),
+                    MigrationJob.updated_at >= active_cutoff,
+                )
+                .limit(1)
             )
             res_active_job = await session.execute(stmt_active_job)
-            active_job = res_active_job.scalar_one_or_none()
+            active_job = res_active_job.scalars().first()
             if active_job and agent.last_seen_at and agent.last_seen_at >= active_cutoff:
                 continue
 
@@ -736,7 +740,10 @@ class AgentService:
             # 2. Check for active/running/queued migration jobs linked to this dead agent
             stmt_jobs = select(MigrationJob).where(
                 MigrationJob.agent_id == agent.id,
-                MigrationJob.status.in_(["queued", "running", "preparing"]),
+                MigrationJob.status.in_([
+                    "queued", "claimed", "preparing", "running",
+                    "recovering", "verifying", "ask_user",
+                ]),
             )
             res_jobs = await session.execute(stmt_jobs)
             running_jobs = list(res_jobs.scalars().all())
@@ -749,6 +756,40 @@ class AgentService:
                 logger.error(
                     f"MigrationJob '{job.id}' failed due to agent '{agent.id}' timeout."
                 )
+
+                # Cascade failure to attached execution plan and running steps
+                from app.modules.execution.execution_models import (
+                    MigrationExecutionPlan,
+                    MigrationExecutionStep,
+                )
+                from app.core.state import ExecutionPlanLifecycle, ExecutionStepLifecycle
+                stmt_plan = (
+                    select(MigrationExecutionPlan)
+                    .where(MigrationExecutionPlan.migration_job_id == job.id)
+                    .options(selectinload(MigrationExecutionPlan.steps))
+                )
+                res_plan = await session.execute(stmt_plan)
+                exec_plan = res_plan.scalar_one_or_none()
+                if exec_plan and exec_plan.status not in (
+                    ExecutionPlanLifecycle.COMPLETED.value,
+                    ExecutionPlanLifecycle.FAILED.value,
+                    ExecutionPlanLifecycle.CANCELLED.value,
+                ):
+                    exec_plan.status = ExecutionPlanLifecycle.FAILED.value
+                    exec_plan.finalized_at = datetime.now(timezone.utc)
+                    for s in exec_plan.steps:
+                        if s.status in (
+                            ExecutionStepLifecycle.PENDING.value,
+                            ExecutionStepLifecycle.RUNNING.value,
+                            ExecutionStepLifecycle.RETRYING.value,
+                            ExecutionStepLifecycle.ASK_USER.value,
+                        ):
+                            s.status = ExecutionStepLifecycle.FAILED.value
+                            s.failure_category = "AGENT_DISCONNECTED"
+                            s.failure_code = "ERR_AGENT_TIMEOUT"
+                            s.error_message = "Agent disconnected or timed out during migration execution."
+                            s.finished_at = datetime.now(timezone.utc)
+                            s.updated_at = datetime.now(timezone.utc)
 
                 # Broadcast job failure event
                 await manager.broadcast_to_agent(

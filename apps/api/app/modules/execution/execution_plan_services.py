@@ -227,8 +227,13 @@ class ExecutionPlanService:
         enforcing concurrency limits and utilizing row-level locks (SKIP LOCKED).
         """
         # Fetch execution plan
+        # Fetch execution plan with plan for tenant isolation
         stmt_plan = (
             select(MigrationExecutionPlan)
+            .options(
+                selectinload(MigrationExecutionPlan.job),
+                selectinload(MigrationExecutionPlan.plan),
+            )
             .where(MigrationExecutionPlan.id == execution_plan_id)
             .with_for_update()
         )
@@ -240,6 +245,17 @@ class ExecutionPlanService:
             ExecutionPlanLifecycle.CANCELLED.value,
         ):
             return None
+
+        # Verify tenant isolation: agent must belong to the same user as the migration plan
+        if agent_id:
+            from app.modules.agents.agents_models import Agent
+            agent_obj = await session.get(Agent, agent_id)
+            if agent_obj and exec_plan.plan and agent_obj.user_id != exec_plan.plan.user_id:
+                logger.warning(
+                    f"Agent '{agent_id}' (user '{agent_obj.user_id}') unauthorized to claim step "
+                    f"for plan '{execution_plan_id}' (user '{exec_plan.plan.user_id}')."
+                )
+                return None
 
         # Fetch all steps for dependency evaluation
         stmt_all_steps = (
@@ -344,12 +360,19 @@ class ExecutionPlanService:
         checkpoint = res.scalar_one_or_none()
 
         if checkpoint:
-            checkpoint.cursor_offset = cursor_offset
-            checkpoint.rows_processed = rows_processed
-            if source_position is not None:
-                checkpoint.source_position = source_position
-            checkpoint.checkpoint_version += 1
-            checkpoint.updated_at = now
+            # Monotonic regression guard: protect against stale, out-of-order checkpoint payloads
+            if cursor_offset >= checkpoint.cursor_offset:
+                checkpoint.cursor_offset = cursor_offset
+                checkpoint.rows_processed = max(rows_processed, checkpoint.rows_processed)
+                if source_position is not None:
+                    checkpoint.source_position = source_position
+                checkpoint.checkpoint_version += 1
+                checkpoint.updated_at = now
+            else:
+                logger.warning(
+                    f"Ignored stale checkpoint regression for step '{step_id}': "
+                    f"existing offset={checkpoint.cursor_offset}, incoming offset={cursor_offset}."
+                )
         else:
             checkpoint = ExecutionCheckpoint(
                 id=uuid.uuid4(),

@@ -2356,3 +2356,50 @@ Implemented a comprehensive, repeatable evaluation and regression framework for 
 ### 4. Trade-offs & Future Considerations
 - Running all 15 scenarios on live LLMs in CI/CD incurs token costs and latency; running against synthetic AST baselines provides instant, zero-cost regression testing for local PRs, while live LLM suites can run on nightly schedules.
 
+---
+
+## [2026-09-25] - Phase 7: Production Hardening and Deployment Readiness
+
+### 1. Decision Summary
+Completed comprehensive production hardening and security auditing across all 10 target dimensions of Migraflow:
+1. **Failure Recovery Hardening**:
+   - Expanded `stale_agent_watchdog` (`check_stale_agents_and_jobs`) and `check_stale_jobs` to monitor all active non-terminal execution states (`claimed`, `preparing`, `running`, `recovering`, `verifying`, `ask_user`).
+   - Fixed multiple results bug in active job queries with `.limit(1)` and `.scalars().first()`.
+   - Cascaded agent crash failures directly into `MigrationExecutionPlan` and all non-completed `MigrationExecutionStep`s with `AGENT_DISCONNECTED` failure classifications.
+   - Cascaded user job cancellation to execution plans and running/pending steps with immediate termination and `finished_at` tracking.
+2. **Database Audit & Concurrency**:
+   - Audited all foreign key indexes, cascade strategies (`CASCADE` for plan/job ownership hierarchies, `SET NULL` for actor history preservation).
+   - Validated row-level locking (`with_for_update(skip_locked=True)`) on job and step claiming, ensuring strict serialization without deadlocks or duplicate processing.
+3. **API Audit & Ownership**:
+   - Added tenant isolation check to `ExecutionPlanService.claim_next_step`, ensuring worker agents cannot claim steps across user/tenant boundaries while permitting multi-agent worker failover within a tenant's fleet.
+   - Hardened `_check_active_execution_lock` to block plan modifications, AI refinements, AST merges, and version restorations during all active execution phases (`queued`, `claimed`, `preparing`, `running`, `paused`, `recovering`, `ask_user`, `verifying`).
+4. **Data Safety & Monotonic Checkpoints**:
+   - Added monotonic regression guard to `ExecutionPlanService.save_checkpoint`: out-of-order or delayed checkpoint payloads cannot regress `cursor_offset` or `rows_processed` backwards.
+   - Added global unhandled exception handler in `app/main.py` that strips database credentials, connection URIs, and bearer tokens using `CredentialSanitizer.mask_credentials`.
+5. **Docker & Container Hardening**:
+   - Added non-root system users (`USER appuser`, `USER node`, `USER agentuser`) to `apps/api/Dockerfile`, `apps/web/Dockerfile`, and `apps/agent/Dockerfile`.
+   - Hardened `apps/api/app/main.py` `/api/v1/health` endpoint with active control-plane database query validation (`SELECT 1`), returning HTTP 200 when healthy and HTTP 503 when database connectivity is degraded.
+   - Configured container resource limits (`deploy.resources.limits`) and health checks in `docker-compose.yml`.
+6. **Disaster Recovery Documentation**:
+   - Created `docs/BACKUP_AND_DISASTER_RECOVERY.md` detailing authoritative data classifications, PITR WAL streaming, failover expectations, and disaster recovery runbooks.
+7. **Comprehensive Unit & Concurrency Test Suite**:
+   - Added `tests/unit/test_phase7_production_hardening_and_audit.py` with 9 comprehensive audit tests covering watchdog recovery, cancellation cascading, active plan locking, monotonic checkpoints, cross-tenant isolation, health probes, exception redaction, idempotency deduplication, and concurrency safety.
+   - Verified 100% test pass rate across the full 176 unit tests.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Distributed migration platforms face silent data corruption risks from out-of-order checkpoint payloads, plan AST edits during active execution, runaway agent crashes during verification, or container privilege escalation in production environments.
+- **Chosen Solution**:
+  - Monotonic checkpoint protection guarantees that network retransmits never rewind ETL positions.
+  - Comprehensive status monitoring prevents jobs in `verifying` or `recovering` from becoming permanent zombie states.
+  - Non-root containers and sanitized error responses enforce defense-in-depth security.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Rewriting the entire agent communication protocol to gRPC**:
+  - _Rejected_: Introduces unnecessary operational complexity. REST + WebSocket with SHA-256 agent token authentication and heartbeat monitoring is robust, performant, and inspectable.
+- **Alternative B: Hard-locking plans exclusively to a single agent container**:
+  - _Rejected_: Prevents automatic failover when an agent container is destroyed or rescheduled by Kubernetes. Tenant-level isolation allows any active worker agent within the user's fleet to resume an orphaned step.
+
+### 4. Trade-offs & Future Considerations
+- Monotonic checkpoints assume sequential linear offsets. For partitioned Kafka or multi-key NoSQL sources, composite partition offset tracking per partition key ensures multi-stream monotonicity.
+
+

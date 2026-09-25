@@ -39,6 +39,11 @@ COPY . /app
 
 RUN chmod +x /app/entrypoint.sh
 
+RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser \
+    && chown -R appuser:appuser /app
+
+USER appuser
+
 EXPOSE 8000
 
 ENTRYPOINT ["/app/entrypoint.sh"]

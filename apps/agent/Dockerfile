@@ -12,4 +12,9 @@ RUN poetry config virtualenvs.create false && poetry install --no-root --no-inte
 
 COPY . /app
 
+RUN groupadd -r agentuser && useradd -r -g agentuser -d /app -s /sbin/nologin agentuser \
+    && chown -R agentuser:agentuser /app
+
+USER agentuser
+
 CMD ["poetry", "run", "python", "main.py"]

@@ -16,7 +16,13 @@ services:
       - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
       - NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL:-}
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1024M
     restart: unless-stopped
 
   api:
@@ -53,6 +59,17 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/v1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2048M
     restart: unless-stopped
 
   agent:
@@ -67,7 +84,13 @@ services:
       - API_URL=http://api:8000
       - AGENT_TOKEN=${AGENT_TOKEN:-}
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2048M
     restart: unless-stopped
 
   postgres:

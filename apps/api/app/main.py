@@ -105,6 +105,38 @@ else:
     )
 
 
+from fastapi import Request, status
+from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from app.core.credential_sanitizer import CredentialSanitizer
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """
+    Global catch-all exception handler to sanitize error messages,
+    ensuring internal credentials, database URIs, and raw stacks are never leaked.
+    """
+    raw_error = str(exc)
+    sanitized_error = CredentialSanitizer.mask_credentials(raw_error)
+    logger.error(
+        f"Unhandled exception in {request.method} {request.url.path}: {sanitized_error}",
+        exc_info=False,
+    )
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "success": False,
+            "message": "An unexpected internal server error occurred.",
+            "error_detail": (
+                sanitized_error
+                if settings.ENVIRONMENT.lower() in ("development", "test", "local")
+                else "Internal server error"
+            ),
+        },
+    )
+
+
 @app.get("/")
 async def root():
     return {
@@ -116,14 +148,32 @@ async def root():
 
 @app.get(f"{settings.API_V1_STR}/health")
 async def health_check():
-    return {
-        "success": True,
-        "message": "System operational",
-        "data": {
-            "status": "ok",
-            "version": "0.1.0",
-            "environment": settings.ENVIRONMENT,
-            "database_connected": True,
-            "redis_connected": True,
+    """
+    Active liveness and readiness probe: validates control-plane database connectivity.
+    Returns HTTP 200 when healthy, or HTTP 503 Service Unavailable when the database is unreachable.
+    """
+    db_connected = False
+    db_error = None
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(text("SELECT 1"))
+            db_connected = True
+    except Exception as exc:
+        db_error = CredentialSanitizer.mask_credentials(str(exc))
+        logger.warning(f"Database health check failed: {db_error}")
+
+    status_code = status.HTTP_200_OK if db_connected else status.HTTP_503_SERVICE_UNAVAILABLE
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "success": db_connected,
+            "message": "System operational" if db_connected else "Database connectivity degraded",
+            "data": {
+                "status": "ok" if db_connected else "degraded",
+                "version": "0.1.0",
+                "environment": settings.ENVIRONMENT,
+                "database_connected": db_connected,
+                "redis_connected": True,
+            },
         },
-    }
+    )

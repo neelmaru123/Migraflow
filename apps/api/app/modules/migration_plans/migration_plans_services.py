@@ -721,7 +721,10 @@ class MigrationPlanService:
         from app.modules.execution.execution_models import MigrationJob
         conditions = [
             MigrationJob.migration_plan_id == plan_id,
-            MigrationJob.status.in_(["queued", "preparing", "running"]),
+            MigrationJob.status.in_([
+                "queued", "claimed", "preparing", "running",
+                "paused", "recovering", "ask_user", "verifying",
+            ]),
         ]
         if ignore_job_id is not None:
             conditions.append(MigrationJob.id != ignore_job_id)

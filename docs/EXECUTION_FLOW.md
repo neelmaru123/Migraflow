@@ -1730,3 +1730,80 @@ sequenceDiagram
 - **[MODIFIED]**: [`apps/api/app/modules/execution/failure_taxonomy.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/failure_taxonomy.py) — Added `classify` convenience method and expanded network/agent crash pattern recognition.
 - **[MODIFIED]**: [`apps/api/tests/unit/test_alembic_migrations.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_alembic_migrations.py) — Updated expected migration head to `c6d7e8f9a0b1`.
 
+---
+
+# Execution Flow — Phase 7: Production Hardening, Watchdog Recovery, and Concurrency Controls
+
+## 1. Entry Points
+
+- **Watchdog Execution Loop**: [`apps/api/app/main.py:L36`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/main.py#L36) (`stale_agent_watchdog()`) runs background timer checking agents and jobs every 20 seconds.
+- **Job Cancellation**: [`apps/api/app/modules/execution/execution_routes.py:L70`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py#L70) (`POST /api/v1/executions/{id}/cancel`).
+- **Health / Readiness Probe**: [`apps/api/app/main.py:L148`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/main.py#L148) (`GET /api/v1/health`).
+- **Granular Step Claiming**: [`apps/api/app/modules/execution/execution_routes.py:L209`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py#L209) (`POST /api/v1/executions/plans/{plan_id}/steps/claim`).
+- **Checkpoint Persistence**: [`apps/api/app/modules/execution/execution_routes.py:L231`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py#L231) (`POST /api/v1/executions/steps/{step_id}/checkpoint`).
+
+## 2. Step-by-Step Execution Sequence
+
+### Flow A: Stale Agent & Active Job Watchdog Recovery
+1. **Periodic Poll**:
+   - `stale_agent_watchdog()` wakes up every 20s and creates an `AsyncSessionLocal()`.
+   - Calls `AgentService.check_stale_agents_and_jobs(session, stale_threshold_seconds=60)`.
+2. **Active Status Candidate Scan**:
+   - Queries `Agent` with status in `["online", "busy", "degraded"]`.
+   - Compares `agent.last_seen_at` against `now - 60s` (or 360s for standby mode).
+   - Verifies if any job is actively reporting progress (`updated_at >= active_cutoff`).
+3. **Disconnection and Failure Cascade**:
+   - If timed out: transitions agent status to `offline`, sets `error_category = "DISCONNECTED_UNEXPECTEDLY"`.
+   - Broadcasts `AGENT_DISCONNECTED` event over WebSockets to UI subscribers.
+   - Queries all associated active jobs across ALL non-terminal states:
+     `status.in_(["queued", "claimed", "preparing", "running", "recovering", "verifying", "ask_user"])`.
+   - Transitions each active job to `failed` with diagnostic reason `"Agent disconnected or timed out during migration execution."`.
+   - Fetches attached `MigrationExecutionPlan` and marks plan `failed`.
+   - Iterates over execution steps: for all steps in `pending`, `running`, `retrying`, or `ask_user`, sets `status = "failed"`, `failure_category = "AGENT_DISCONNECTED"`, `finished_at = now`.
+   - Commits transaction.
+
+### Flow B: Cascading Execution Cancellation
+1. **User Cancellation Request**:
+   - User triggers `POST /api/v1/executions/{id}/cancel` via frontend dashboard.
+   - Enforces user ownership (`MigrationPlan.user_id == current_user.id`).
+2. **State Machine Transition**:
+   - Calls `ExecutionStateMachine.transition_job(job, target_state=CANCELLED)`.
+   - Resets assigned agent status to `online` and sets `agent.idle_since = now`.
+3. **Execution Plan & Step Cascade**:
+   - Queries attached `MigrationExecutionPlan` and all linked `MigrationExecutionStep` entities.
+   - If plan is active, sets `exec_plan.status = "cancelled"` and `exec_plan.finalized_at = now`.
+   - For all steps with status in `["pending", "running", "retrying", "ask_user"]`, transitions to `status = "cancelled"` and sets `s.finished_at = now`.
+   - Emits `EXECUTION_PROGRESS` WebSocket broadcast with `status = "cancelled"`.
+
+### Flow C: Monotonic Checkpoint Forward-Only Progression
+1. **Checkpoint Submission**:
+   - Worker agent posts `POST /api/v1/executions/steps/{step_id}/checkpoint` with `cursor_offset`, `rows_processed`, and `source_position`.
+2. **Atomic Row Lock & Monotonic Check**:
+   - `ExecutionPlanService.save_checkpoint()` locks existing checkpoint record with `.with_for_update()`.
+   - Compares incoming `cursor_offset` with `checkpoint.cursor_offset`:
+     - If `cursor_offset >= checkpoint.cursor_offset`: updates offset, updates `rows_processed = max(...)`, increments `checkpoint_version += 1`, updates `updated_at = now`.
+     - If `cursor_offset < checkpoint.cursor_offset` (stale delayed packet or duplicate runner): logs warning and ignores stale regression, preserving durable forward progress.
+
+### Flow D: Multi-Tenant Step Claiming Isolation
+1. **Step Claim Request**:
+   - Agent submits `POST /api/v1/executions/plans/{plan_id}/steps/claim` with `X-Agent-Token`.
+2. **Tenant Isolation Verification**:
+   - Acquires row lock on `MigrationExecutionPlan` with `.with_for_update()`.
+   - Loads `exec_plan.plan` and authenticates claiming agent.
+   - Verifies that `agent.user_id == exec_plan.plan.user_id`. If tenant IDs mismatch, rejects with unauthorized log warning and returns `None`.
+   - If valid: checks concurrency limit, evaluates dependencies, marks step `running`, and increments `attempt_count`.
+
+## 3. Impact & Delta Analysis
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_services.py) — Expanded watchdog to monitor all active job states (`claimed`, `verifying`, `recovering`), fixed `limit(1)` multiple results query, and cascaded agent crash failures into execution plans and steps.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py) — Added cascading cancellation to `MigrationExecutionPlan` and all active steps; expanded `check_stale_jobs` to include all non-terminal states.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_plan_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_plan_services.py) — Added monotonic checkpoint forward-only protection in `save_checkpoint`; added multi-tenant user isolation in `claim_next_step`.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py) — Hardened `_check_active_execution_lock` to block edits/refinements during all active execution states (`queued`, `claimed`, `preparing`, `running`, `paused`, `recovering`, `ask_user`, `verifying`).
+- **[MODIFIED]**: [`apps/api/app/main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/main.py) — Added active database connectivity probe (`SELECT 1`) to `/health` endpoint returning 200/503; added global exception handler with `CredentialSanitizer.mask_credentials`.
+- **[MODIFIED]**: [`apps/api/Dockerfile`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/Dockerfile) — Hardened runner container with non-root system user (`USER appuser`).
+- **[MODIFIED]**: [`apps/web/Dockerfile`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/Dockerfile) — Hardened Next.js runner stage with non-root user (`USER node`).
+- **[MODIFIED]**: [`apps/agent/Dockerfile`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/Dockerfile) — Hardened agent container with non-root system user (`USER agentuser`).
+- **[MODIFIED]**: [`docker-compose.yml`](file:///d:/GitHub/Ai_data_migration_platform/docker-compose.yml) — Added active health checks for `api`, container resource limits (`deploy.resources.limits`), and dependency ordering.
+- **[NEW]**: [`docs/BACKUP_AND_DISASTER_RECOVERY.md`](file:///d:/GitHub/Ai_data_migration_platform/docs/BACKUP_AND_DISASTER_RECOVERY.md) — Comprehensive operational disaster recovery architecture, authoritative system of record matrix, RPO/RTO targets, and recovery runbooks.
+- **[NEW]**: [`apps/api/tests/unit/test_phase7_production_hardening_and_audit.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_phase7_production_hardening_and_audit.py) — 9 comprehensive unit and concurrency tests validating recovery, cancellation cascading, active plan locks, monotonic checkpoints, cross-tenant isolation, health probes, and credential scrubbing.
+
+

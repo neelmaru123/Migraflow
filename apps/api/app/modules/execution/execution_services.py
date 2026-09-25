@@ -408,7 +408,7 @@ class ExecutionService:
         """
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_threshold_seconds)
         stmt = select(MigrationJob).where(
-            MigrationJob.status.in_(["queued", "running", "preparing"]),
+            MigrationJob.status.in_(["queued", "claimed", "preparing", "running", "recovering", "verifying"]),
             MigrationJob.updated_at < cutoff,
         )
         res = await session.execute(stmt)
@@ -515,6 +515,38 @@ class ExecutionService:
             )
 
         now = datetime.now(timezone.utc)
+
+        # Cascade cancellation to execution plan and pending/running/retrying steps
+        from app.modules.execution.execution_models import (
+            MigrationExecutionPlan,
+            MigrationExecutionStep,
+        )
+        from app.core.state import ExecutionPlanLifecycle, ExecutionStepLifecycle
+        stmt_plan = (
+            select(MigrationExecutionPlan)
+            .where(MigrationExecutionPlan.migration_job_id == job.id)
+            .options(selectinload(MigrationExecutionPlan.steps))
+        )
+        res_plan = await session.execute(stmt_plan)
+        exec_plan = res_plan.scalar_one_or_none()
+        if exec_plan and exec_plan.status not in (
+            ExecutionPlanLifecycle.COMPLETED.value,
+            ExecutionPlanLifecycle.FAILED.value,
+            ExecutionPlanLifecycle.CANCELLED.value,
+        ):
+            exec_plan.status = ExecutionPlanLifecycle.CANCELLED.value
+            exec_plan.finalized_at = now
+            for s in exec_plan.steps:
+                if s.status in (
+                    ExecutionStepLifecycle.PENDING.value,
+                    ExecutionStepLifecycle.RUNNING.value,
+                    ExecutionStepLifecycle.RETRYING.value,
+                    ExecutionStepLifecycle.ASK_USER.value,
+                ):
+                    s.status = ExecutionStepLifecycle.CANCELLED.value
+                    s.finished_at = now
+                    s.updated_at = now
+
         # Reset assigned Docker Agent status to online
         if job.agent_id:
             stmt_agent = select(Agent).where(Agent.id == job.agent_id)
