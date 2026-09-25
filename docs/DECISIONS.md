@@ -2272,3 +2272,87 @@ Implemented a production-grade, internal observability and operational control m
 ### 4. Trade-offs & Future Considerations
 - Internal trace tables grow with large migrations; retention/pruning policies (e.g., 30-day archival) will be scheduled in future operational maintenance cron jobs.
 
+---
+
+## [2026-09-25] - Phase 6: Agentic Evaluation, Regression Testing and Failure Simulation
+
+### 1. Decision Summary
+Implemented a comprehensive, repeatable evaluation and regression framework for Migraflow's AI planning, recovery, and operational resilience:
+1. **Synthetic Evaluation Dataset (`EvaluationScenario` / `build_evaluation_scenarios`)**:
+   - 15 representative, self-contained migration scenarios:
+     1. Simple 1:1 PostgreSQL migration
+     2. MySQL → PostgreSQL cross-dialect type mapping
+     3. MongoDB document store → relational transformation
+     4. Multiple heterogeneous sources → single consolidated target
+     5. Conflicting column name resolution
+     6. Differing primary key schema harmonization
+     7. Nullable vs. NOT NULL constraint mismatch
+     8. Duplicate record deduplication strategies
+     9. Foreign key topological dependency ordering
+     10. In-flight schema drift detection
+     11. Missing source table deterministic rejection
+     12. Unsupported spatial/geometric data type detection and text/JSON fallback
+     13. Complex SQL expression transformation requirement
+     14. Destructive target operation safety classification and approval requirement
+     15. Ambiguous mapping and confidence calibration
+   - Strictly utilizes synthetic schema metadata and sample records; ZERO customer or production data is stored.
+2. **Multi-Dimensional Planning Evaluator (`PlanningEvaluator`)**:
+   - Deterministically measures AI migration plans across 8 engineering dimensions:
+     1. Schema correctness
+     2. Table mapping correctness
+     3. Column mapping correctness
+     4. Constraint correctness (two-phase FK hygiene and PK preservation)
+     5. Validation accuracy (deterministic AST vs. synthetic metadata verification)
+     6. Unsupported-operation detection
+     7. Unnecessary transformation detection (penalizes redundant casts and identity expressions)
+     8. Confidence calibration (penalizes overconfidence on ambiguous schemas)
+3. **Deterministic Recovery Evaluator (`RecoveryEvaluator`)**:
+   - Evaluates the failure lifecycle: `Failure -> Classification -> Retry / Recover / Replan / ASK_USER / Fail`.
+   - Validates that the deterministic router makes correct decisions and strictly enforces anti-infinite-loop circuit breakers (`MAX_RETRIES_PER_STEP`, `MAX_REPLANS_PER_JOB`, `MAX_LLM_CALLS`).
+4. **Strict LLM Output Evaluator (`LLMOutputEvaluator`)**:
+   - Validates model responses against strict Pydantic JSON schemas.
+   - Measures: invalid output rate, schema violation count, validation failure rate, self-correction rate, and successful correction rate.
+5. **Durable Regression Testing & Run Comparison (`EvaluationService.compare_suite_runs`)**:
+   - Persists benchmark suite runs in `evaluation_suite_runs` and granular scenario records in `evaluation_scenario_results`.
+   - Automates diff analysis between planner, prompt, and model versions (e.g. `gpt-4o:p-migration-2026.04` vs. `gpt-4o:p-migration-2026.05`).
+   - Computes deltas in pass rate, planning score, cost, and latency, and categorizes regressed, improved, and unchanged scenarios.
+6. **Cost and Latency Accounting**:
+   - Tracks prompt tokens, completion tokens, LLM API calls, duration (ms), and estimated cost (USD) per scenario and suite.
+7. **Controlled Operational Failure Injection (`FailureInjectionSimulator`)**:
+   - Automated simulation harness for 7 critical failure modes:
+     1. Agent crash (heartbeat timeout / worker termination)
+     2. Network failure (socket disconnect / transient reset)
+     3. Database timeout (slow query timeout)
+     4. Schema drift (source metadata changes mid-run)
+     5. Invalid AST (corrupted blueprint JSON)
+     6. Target constraint failure (duplicate key / FK integrity breach)
+     7. Verification mismatch (row count discrepancies post-ETL)
+   - Verifies lifecycle state machine transitions (`FAILED` / `NEEDS_REVIEW`) and zero unhandled states.
+8. **Measurable Engineering Quality Gates (`QualityGateValidator`)**:
+   - Deterministic Validation Pass Rate $\ge 95\%$
+   - Critical Safety Violations $== 0$
+   - Credential Leakage $== 0$
+   - Unhandled Execution States $== 0$
+   - Recovery Routing Accuracy $\ge 90\%$
+   - LLM Output AST Validity $\ge 95\%$
+9. **Linear Database Migration**:
+   - Created Alembic revision `018_add_evaluation_and_regression_testing.py` (`c6d7e8f9a0b1`, downstream of `b5c6d7e8f9a0`).
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: AI planner and prompt adjustments in migration systems frequently cause silent regressions (e.g., subtle column omission, inappropriate type casting, overconfident mapping of ambiguous tables, or failure to route unexpected exceptions).
+- **Chosen Solution**:
+  - Repeatable, automated synthetic benchmarks eliminate reliance on subjective quality scores or manual QA.
+  - Measurable engineering gates guarantee that safety violations, credential leaks, and unhandled execution states block deployments deterministically.
+  - Cost and latency tracking prevents optimizing purely for plan correctness while ballooning token consumption or API expenses.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Evaluating on anonymized customer database dumps**:
+  - _Rejected_: Poses severe security, GDPR/HIPAA compliance, and credential leakage risks. Pure synthetic metadata provides full architectural edge-case coverage safely.
+- **Alternative B: LLM-as-a-judge scoring with subjective 1-10 scores**:
+  - _Rejected_: Subjective LLM grading is non-deterministic and susceptible to sycophancy or hallucination. Deterministic schema, constraint, and recovery validation rules provide reproducible ground truth.
+- **Alternative C: Testing only happy-path migrations**:
+  - _Rejected_: Migrations almost always encounter drift, timeouts, or constraint issues in real enterprises. Failure injection and negative rejection scenarios (missing tables, spatial types, ambiguous tables) are essential.
+
+### 4. Trade-offs & Future Considerations
+- Running all 15 scenarios on live LLMs in CI/CD incurs token costs and latency; running against synthetic AST baselines provides instant, zero-cost regression testing for local PRs, while live LLM suites can run on nightly schedules.
+

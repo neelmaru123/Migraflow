@@ -22,13 +22,14 @@ def test_alembic_migration_chain_is_linear_and_valid():
     # 1. Verify single head
     heads = script.get_heads()
     assert len(heads) == 1, f"Expected exactly 1 migration head, found {heads}"
-    assert heads[0] == "b5c6d7e8f9a0"
+    assert heads[0] == "c6d7e8f9a0b1"
 
     # 2. Verify complete linear chain from head to base
     revisions = list(script.walk_revisions(base="base", head="heads"))
     rev_ids = [r.revision for r in revisions]
 
     expected_order = [
+        "c6d7e8f9a0b1",
         "b5c6d7e8f9a0",
         "a4b5c6d7e8f9",
         "f3a4b5c6d7e8",
@@ -51,6 +52,7 @@ def test_alembic_migration_chain_is_linear_and_valid():
 
     # 3. Verify down_revision pointers are exact
     rev_map = {r.revision: r.down_revision for r in revisions}
+    assert rev_map["c6d7e8f9a0b1"] == "b5c6d7e8f9a0"
     assert rev_map["b5c6d7e8f9a0"] == "a4b5c6d7e8f9"
     assert rev_map["a4b5c6d7e8f9"] == "f3a4b5c6d7e8"
     assert rev_map["f3a4b5c6d7e8"] == "e2f3a4b5c6d7"

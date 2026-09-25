@@ -10,7 +10,7 @@ Defines the complete TransformationPlanAST Pydantic model hierarchy that:
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ============================================================================
@@ -48,14 +48,32 @@ TABLE_TRANSFORMATION_TYPES = Literal[
 
 class SourceColumnRef(BaseModel):
     """Reference to a specific source column in a source database."""
+    model_config = ConfigDict(extra="ignore")
+
     identifier: str = Field(..., description="Logical database alias (e.g. 'source_db_1')")
     schema_name: str = Field(default="public", description="Schema name in source database")
     table_name: str = Field(..., description="Source table name")
     column_name: str = Field(..., description="Source column name")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _remap_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "source_id" in data and "identifier" not in data:
+                data["identifier"] = data["source_id"]
+            if "source_alias" in data and "identifier" not in data:
+                data["identifier"] = data["source_alias"]
+            if "table" in data and "table_name" not in data:
+                data["table_name"] = data["table"]
+            if "column" in data and "column_name" not in data:
+                data["column_name"] = data["column"]
+        return data
+
 
 class SourceTableRef(BaseModel):
     """Reference to a source table participating in a table-level mapping."""
+    model_config = ConfigDict(extra="ignore")
+
     identifier: str = Field(..., description="Logical database alias (e.g. 'source_db_1')")
     schema_name: str = Field(default="public", description="Schema name in source database")
     table_name: str = Field(..., description="Source table name")
@@ -64,6 +82,18 @@ class SourceTableRef(BaseModel):
         description="How this source table participates in the target table construction",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _remap_aliases(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "source_id" in data and "identifier" not in data:
+                data["identifier"] = data["source_id"]
+            if "source_alias" in data and "identifier" not in data:
+                data["identifier"] = data["source_alias"]
+            if "table" in data and "table_name" not in data:
+                data["table_name"] = data["table"]
+        return data
+
 
 # ============================================================================
 # Conflict Resolution
@@ -71,6 +101,8 @@ class SourceTableRef(BaseModel):
 
 class ConflictResolutionSpec(BaseModel):
     """Strategy for handling PK conflicts and duplicate rows when merging sources."""
+    model_config = ConfigDict(extra="ignore")
+
     primary_key_strategy: Literal[
         "uuid_v4_rekey",         # Replace integer PKs with new UUIDs
         "prefix_id",             # Prefix existing IDs with source alias (src1_101)
@@ -86,6 +118,20 @@ class ConflictResolutionSpec(BaseModel):
         "merge_all",            # Keep all rows (no deduplication)
     ]] = Field(default="first_wins")
 
+    @model_validator(mode="before")
+    @classmethod
+    def _remap_strategy(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "strategy" in data and not data.get("deduplication_strategy"):
+                s = data["strategy"]
+                if s in ["last_write_wins", "last_updated_wins"]:
+                    data["deduplication_strategy"] = "last_updated_wins"
+                elif s in ["first_wins"]:
+                    data["deduplication_strategy"] = "first_wins"
+                else:
+                    data["deduplication_strategy"] = "first_wins"
+        return data
+
 
 # ============================================================================
 # Column Mapping Specification
@@ -96,6 +142,8 @@ class ColumnMappingSpec(BaseModel):
     Defines how a target column is produced from one or more source columns.
     This is the primary unit the UI uses to render transformation visualization cards.
     """
+    model_config = ConfigDict(extra="ignore")
+
     target_column_name: Optional[str] = Field(
         None, description="Target column name. Null only for drop_column type."
     )
@@ -105,10 +153,10 @@ class ColumnMappingSpec(BaseModel):
     nullable: Optional[bool] = Field(None, description="Whether target column allows NULL values")
     is_primary_key: bool = Field(default=False)
     transformation_type: COLUMN_TRANSFORMATION_TYPES = Field(
-        ..., description="Type of transformation applied to produce this target column"
+        default="direct_copy", description="Type of transformation applied to produce this target column"
     )
-    ui_badge_type: COLUMN_TRANSFORMATION_TYPES = Field(
-        ..., description="Badge type for UI rendering — must match transformation_type"
+    ui_badge_type: Optional[COLUMN_TRANSFORMATION_TYPES] = Field(
+        default=None, description="Badge type for UI rendering — must match transformation_type"
     )
     source_columns: List[SourceColumnRef] = Field(
         default_factory=list,
@@ -121,8 +169,22 @@ class ColumnMappingSpec(BaseModel):
         None, description="The constant value for default_constant type (e.g. 'org_01')"
     )
     explanation: str = Field(
-        ..., description="Plain-English explanation for the non-technical user shown in the UI"
+        default="", description="Plain-English explanation for the non-technical user shown in the UI"
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _populate_badge_and_explanation(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            t_type = data.get("transformation_type", "direct_copy")
+            if t_type == "expression_sql":
+                t_type = "expression"
+                data["transformation_type"] = "expression"
+            if not data.get("ui_badge_type"):
+                data["ui_badge_type"] = t_type
+            if not data.get("explanation"):
+                data["explanation"] = f"Map to {data.get('target_column_name', 'target')}"
+        return data
 
 
 # ============================================================================
@@ -134,12 +196,14 @@ class TableMappingSpec(BaseModel):
     Defines how a target table is constructed from one or more source tables.
     Contains all column mappings and conflict resolution strategies.
     """
+    model_config = ConfigDict(extra="ignore")
+
     target_table_name: str = Field(..., description="Name of the target table")
     transformation_type: TABLE_TRANSFORMATION_TYPES = Field(
-        ..., description="Table-level transformation type"
+        default="direct_copy", description="Table-level transformation type"
     )
     ai_reasoning: str = Field(
-        ..., description="LLM explanation of why this table mapping was chosen"
+        default="", description="LLM explanation of why this table mapping was chosen"
     )
     confidence_score: float = Field(
         default=1.0, ge=0.0, le=1.0,
@@ -149,11 +213,20 @@ class TableMappingSpec(BaseModel):
         None, description="Required when transformation_type is 'merge'"
     )
     source_tables: List[SourceTableRef] = Field(
-        ..., description="One or more source tables contributing to this target table"
+        default_factory=list, description="One or more source tables contributing to this target table"
     )
     column_mappings: List[ColumnMappingSpec] = Field(
-        ..., description="All target columns with their transformation specs"
+        default_factory=list, description="All target columns with their transformation specs"
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _sanitize_table_mapping(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            t_type = data.get("transformation_type", "direct_copy")
+            if t_type not in ["direct_copy", "merge", "split_target"]:
+                data["transformation_type"] = "direct_copy"
+        return data
 
 
 # ============================================================================
@@ -205,10 +278,10 @@ class TransformationPlanAST(BaseModel):
     This is the exact JSON structure the LLM must produce via with_structured_output().
     """
     target_database_type: str = Field(
-        ..., description="Target database dialect (e.g. 'postgresql', 'mysql', 'sqlite')"
+        default="postgresql", description="Target database dialect (e.g. 'postgresql', 'mysql', 'sqlite')"
     )
     ai_explanation: str = Field(
-        ..., description="Markdown narrative explaining the overall multi-source merge strategy shown to user"
+        default="", description="Markdown narrative explaining the overall multi-source merge strategy shown to user"
     )
     confidence_score: float = Field(
         default=0.9, ge=0.0, le=1.0,
@@ -219,7 +292,7 @@ class TransformationPlanAST(BaseModel):
         description="List of data quality risks, manual cleanup suggestions, or ambiguous mappings"
     )
     table_mappings: List[TableMappingSpec] = Field(
-        ..., description="All target tables with their full transformation specifications"
+        default_factory=list, description="All target tables with their full transformation specifications"
     )
     pre_migration_ddl: List[str] = Field(
         default_factory=list,
@@ -233,6 +306,12 @@ class TransformationPlanAST(BaseModel):
         None,
         description="Detailed conversational feedback from the LLM regarding user refinement instructions."
     )
+
+
+# Backwards-compatible and concise aliases
+ColumnMapping = ColumnMappingSpec
+TableMapping = TableMappingSpec
+ConflictResolution = ConflictResolutionSpec
 
 
 # ============================================================================

@@ -306,12 +306,49 @@ class ExecutionEventType(str, Enum):
     BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
     TIMEOUT_TRIGGERED = "TIMEOUT_TRIGGERED"
 
+    # Evaluation & Regression Testing Events
+    EVALUATION_SUITE_STARTED = "EVALUATION_SUITE_STARTED"
+    EVALUATION_SUITE_COMPLETED = "EVALUATION_SUITE_COMPLETED"
+    EVALUATION_SCENARIO_PASSED = "EVALUATION_SCENARIO_PASSED"
+    EVALUATION_SCENARIO_FAILED = "EVALUATION_SCENARIO_FAILED"
+    QUALITY_GATE_EVALUATED = "QUALITY_GATE_EVALUATED"
+
     # Agent Lifecycle Events
     AGENT_REGISTERED = "AGENT_REGISTERED"
     AGENT_CONNECTED = "AGENT_CONNECTED"
     AGENT_DISCONNECTED = "AGENT_DISCONNECTED"
     AGENT_STATUS_CHANGED = "AGENT_STATUS_CHANGED"
     AGENT_HEARTBEAT = "AGENT_HEARTBEAT"
+
+
+class EvaluationScenarioCategory(NormalizedStrEnum):
+    """
+    Categories for evaluation scenarios in Phase 6.
+    """
+    PLANNING = "planning"
+    RECOVERY = "recovery"
+    FAILURE_INJECTION = "failure_injection"
+    EDGE_CASE = "edge_case"
+
+
+class EvaluationStatus(NormalizedStrEnum):
+    """
+    Status of an evaluation suite or individual scenario run.
+    """
+    PENDING = "pending"
+    RUNNING = "running"
+    PASSED = "passed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class QualityGateStatus(NormalizedStrEnum):
+    """
+    Outcome of deterministic quality gate checks.
+    """
+    PASSED = "passed"
+    FAILED = "failed"
+
 
 
 class TraceOperationType(NormalizedStrEnum):

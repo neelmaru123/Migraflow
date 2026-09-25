@@ -1588,3 +1588,145 @@ sequenceDiagram
 - **[MODIFIED]**: [`apps/api/app/main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/main.py) — Registered `observability_router` under `/api/v1` and loaded `observability_models`.
 - **[MODIFIED]**: [`apps/api/tests/unit/test_alembic_migrations.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_alembic_migrations.py) — Updated expected migration head to `b5c6d7e8f9a0`.
 
+---
+
+### Phase G: Agentic Evaluation, Regression Testing & Failure Simulation (Phase 6)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as Test Suite / CI/CD Runner
+    participant EvalRouter as EvaluationRoutes (/api/v1/evaluation)
+    participant EvalService as EvaluationService
+    participant Dataset as EvaluationDataset (15 Scenarios)
+    participant PlanEval as PlanningEvaluator (8 Dimensions)
+    participant RecovEval as RecoveryEvaluator (Deterministic Router)
+    participant LLMEval as LLMOutputEvaluator (AST Schemas)
+    participant FailSim as FailureInjectionSimulator (7 Failure Modes)
+    participant Gates as QualityGateValidator (Engineering Criteria)
+    participant DB as Evaluation Database Models
+
+    Client->>EvalRouter: POST /api/v1/evaluation/runs (suite_name, model, prompt_version, planner_version)
+    EvalRouter->>EvalService: run_evaluation_suite(db, request)
+    EvalService->>Dataset: build_evaluation_scenarios() (15 Synthetic Scenarios)
+    
+    loop For each Scenario in Dataset
+        EvalService->>PlanEval: evaluate(scenario, baseline_ast)
+        Note over PlanEval: Measures Schema, Table, Column, Constraint, Validation, Unsupported Ops, Unnecessary Transforms, Confidence Calibration
+        PlanEval-->>EvalService: PlanningMetricsReport
+        
+        EvalService->>RecovEval: evaluate_failure_scenario(error, expected_category, expected_action)
+        Note over RecovEval: Tests Classifier & Router (RETRY / RECOVER / REPLAN / ASK_USER) + Circuit Breakers
+        RecovEval-->>EvalService: RecoveryMetricsReport
+        
+        EvalService->>LLMEval: evaluate_response(raw_output, expected_ast)
+        Note over LLMEval: Strict AST validation, schema violation counts, self-correction tracking
+        LLMEval-->>EvalService: LLMOutputMetricsReport
+        
+        opt Failure Injection Scenario (Drift / Constraint / Verification)
+            EvalService->>FailSim: simulate operational failure
+            FailSim-->>EvalService: FailureInjectionResult (Safe transition, zero unhandled)
+        end
+        
+        Note over EvalService: Calculate tokens, LLM calls, latency (ms), and cost (USD)
+    end
+
+    EvalService->>Gates: evaluate(scenario_results)
+    Note over Gates: Check Validation Rate >= 95%, Safety Violations == 0, Credential Leaks == 0, Unhandled == 0
+    Gates-->>EvalService: QualityGateEvaluationResponse(overall_passed, gates)
+
+    EvalService->>DB: Persist EvaluationSuiteRun + EvaluationScenarioResult records
+    EvalService-->>EvalRouter: EvaluationSuiteRunResponse
+    EvalRouter-->>Client: 201 Created (Metrics, Costs, Gate Status)
+
+    opt Regression Diff Request
+        Client->>EvalRouter: POST /api/v1/evaluation/regression/compare (baseline_id, target_id)
+        EvalRouter->>EvalService: compare_suite_runs(db, baseline_id, target_id)
+        Note over EvalService: Compute pass rate delta, planning delta, cost delta, latency delta, regressed/improved scenarios
+        EvalService-->>EvalRouter: RegressionComparisonResponse(verdict, summary)
+        EvalRouter-->>Client: 200 OK (Regression Verdict)
+    end
+```
+
+### Detailed Flow Specifications
+
+### Step 1: Synthetic Evaluation Dataset Isolation
+1. **Zero Production Data Leakage**:
+   - `build_evaluation_scenarios()` synthesizes 15 canonical migration scenarios spanning standard relational 1:1, cross-dialect type casting, MongoDB document unflattening, multi-source consolidation, column/PK conflict resolution, nullable mismatch, deduplication, FK dependencies, schema drift, missing table rejection, unsupported spatial data types, expression transforms, destructive truncations, and ambiguous schema calibration.
+   - All sample rows and schemas use purely synthetic identifiers; zero real customer credentials or PII exist.
+
+### Step 2: Multi-Dimensional Planning Evaluation
+1. **8 Engineering Dimensions**:
+   - `PlanningEvaluator.evaluate()` deterministically measures:
+     - `schema_correctness`: Correct target column data types.
+     - `table_mapping_correctness`: Participation of expected source tables in target construction.
+     - `column_mapping_correctness`: Presence and proper mapping of all required target attributes.
+     - `constraint_correctness`: Enforcement of primary keys and two-phase foreign key creation hygiene.
+     - `validation_accuracy`: Deterministic validator agreement with expected validity / rejection ground truth.
+     - `unsupported_operation_detection`: Automatic flagging of proprietary spatial/geometry types with fallback text/JSON mapping.
+     - `unnecessary_transformations`: Penalization of redundant identity casts and nested trivial transformations.
+     - `confidence_calibration`: Proper penalization of overconfidence when schema mappings are ambiguous.
+
+### Step 3: Deterministic Failure Recovery & Circuit Breakers
+1. **Recovery Routing**:
+   - `RecoveryEvaluator.evaluate_failure_scenario()` runs errors through `FailureClassifier` and `RecoveryRouter`.
+   - Transient network/database errors map deterministically to `RETRY` with backoff.
+   - Schema drift maps to `REPLAN`.
+   - Agent heartbeat loss maps to `RECOVER`.
+   - Destructive target operations without prior approval route to `ASK_USER`.
+2. **Anti-Infinite-Loop Circuit Breakers**:
+   - Prevents runaway recursion loops by terminating retries (`> MAX_RETRIES_PER_STEP`), replans (`> MAX_REPLANS_PER_JOB`), and LLM calls (`> MAX_LLM_CALLS`), forcing escalation to `FAIL` or `ASK_USER`.
+
+### Step 4: Strict Schema LLM Output Validation
+1. **AST Compliance**:
+   - `LLMOutputEvaluator.evaluate_response()` parses JSON outputs and evaluates against `TransformationPlanAST`.
+   - Tracks JSON syntax validity, Pydantic model compliance, validation failure rates, and self-correction success rates across model retry attempts.
+
+### Step 5: Controlled Operational Failure Injection
+1. **Resilience Verification**:
+   - `FailureInjectionSimulator` runs controlled simulations of 7 failure scenarios:
+     1. Agent crash
+     2. Network drop
+     3. Database timeout
+     4. Schema drift
+     5. Corrupted/invalid AST
+     6. Target constraint violation
+     7. Post-ETL verification row count mismatch
+   - Proves that platform lifecycle state machine transitions safely (`FAILED` or `NEEDS_REVIEW`) and never crashes into unhandled execution states.
+
+### Step 6: Engineering Quality Gates
+1. **Measurable Engineering Thresholds**:
+   - `QualityGateValidator.evaluate()` enforces strict engineering criteria:
+     - `Deterministic Validation Pass Rate >= 95%`
+     - `Critical Safety Violations == 0` (zero unauthorized destructive drops or safety bypasses)
+     - `Credential Leakage == 0` (regex scanning for passwords, tokens, connection URIs)
+     - `Unhandled Execution State == 0` (zero unhandled exceptions or runaway loops)
+     - `Recovery Routing Accuracy >= 90%`
+     - `LLM Output AST Validity >= 95%`
+
+### Step 7: Version Regression Diffing
+1. **Automated Version Comparisons**:
+   - `EvaluationService.compare_suite_runs()` compares baseline and candidate benchmark runs.
+   - Computes deltas in pass rate, planning score, token cost (USD), and latency (ms).
+   - Generates definitive verdicts: `NO_REGRESSION`, `IMPROVED`, or `REGRESSION_DETECTED`.
+
+## 4. Impact & Delta Analysis
+- **[NEW]**: [`apps/api/app/modules/evaluation/__init__.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/evaluation/__init__.py) — Module entry point exporting evaluation models, router, and service.
+- **[NEW]**: [`apps/api/app/modules/evaluation/evaluation_models.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/evaluation/evaluation_models.py) — SQLAlchemy models `EvaluationSuiteRun` and `EvaluationScenarioResult`.
+- **[NEW]**: [`apps/api/app/modules/evaluation/evaluation_schemas.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/evaluation/evaluation_schemas.py) — Pydantic DTOs for scenarios, suite runs, scenario results, regression diffs, and quality gates.
+- **[NEW]**: [`apps/api/app/modules/evaluation/evaluation_dataset.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/evaluation/evaluation_dataset.py) — Standardized 15-scenario synthetic migration evaluation dataset with ground truth.
+- **[NEW]**: [`apps/api/app/modules/evaluation/evaluator_planning.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/evaluation/evaluator_planning.py) — Planning evaluator across 8 engineering dimensions.
+- **[NEW]**: [`apps/api/app/modules/evaluation/evaluator_recovery.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/evaluation/evaluator_recovery.py) — Recovery evaluator verifying failure classification, deterministic routing, and circuit breakers.
+- **[NEW]**: [`apps/api/app/modules/evaluation/evaluator_llm_output.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/evaluation/evaluator_llm_output.py) — Strict AST schema validator tracking syntax errors, violation rates, and self-correction.
+- **[NEW]**: [`apps/api/app/modules/evaluation/failure_injection.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/evaluation/failure_injection.py) — Operational failure simulation harness for 7 critical failure modes.
+- **[NEW]**: [`apps/api/app/modules/evaluation/quality_gates.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/evaluation/quality_gates.py) — Quality gate validation engine enforcing measurable engineering thresholds.
+- **[NEW]**: [`apps/api/app/modules/evaluation/evaluation_service.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/evaluation/evaluation_service.py) — Evaluation service orchestrating suite benchmarks, regression comparisons, cost/latency tracking, and failure simulations.
+- **[NEW]**: [`apps/api/app/modules/evaluation/evaluation_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/evaluation/evaluation_routes.py) — REST endpoints for scenarios, suite runs, regression diff comparisons, and failure simulations.
+- **[NEW]**: [`apps/api/alembic/versions/018_add_evaluation_and_regression_testing.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/alembic/versions/018_add_evaluation_and_regression_testing.py) — Linear database migration (`c6d7e8f9a0b1`, revises `b5c6d7e8f9a0`).
+- **[NEW]**: [`apps/api/tests/unit/test_phase6_evaluation_and_regression.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_phase6_evaluation_and_regression.py) — 13 comprehensive unit tests validating dataset integrity, planning metrics, recovery circuit breakers, LLM output evaluation, failure injections, quality gates, and version regression analysis.
+- **[MODIFIED]**: [`apps/api/app/core/state.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/core/state.py) — Added evaluation event types (`EVALUATION_SUITE_STARTED`, `EVALUATION_SUITE_COMPLETED`, etc.) and enums (`EvaluationScenarioCategory`, `EvaluationStatus`, `QualityGateStatus`).
+- **[MODIFIED]**: [`apps/api/app/main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/main.py) — Registered `evaluation_router` under `/api/v1` and loaded `evaluation_models`.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_schemas.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_schemas.py) — Added model validators, defaults, and aliases for concise AST specification.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/failure_taxonomy.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/failure_taxonomy.py) — Added `classify` convenience method and expanded network/agent crash pattern recognition.
+- **[MODIFIED]**: [`apps/api/tests/unit/test_alembic_migrations.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_alembic_migrations.py) — Updated expected migration head to `c6d7e8f9a0b1`.
+

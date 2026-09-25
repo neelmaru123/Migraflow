@@ -73,6 +73,25 @@ class FailureClassifier:
     """
 
     @classmethod
+    def classify(
+        cls,
+        error: Any,
+        step_type: Optional[str] = None,
+        step_key: Optional[str] = None,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> ClassifiedFailure:
+        """Convenience method that accepts Exception or string and classifies it."""
+        ctx = dict(context or {})
+        if step_type:
+            ctx["step_type"] = step_type
+        if step_key:
+            ctx["step_key"] = step_key
+
+        if isinstance(error, Exception):
+            return cls.classify_exception(error, context=ctx)
+        return cls.classify_error_payload(error_type="MigrationExecutionError", error_message=str(error), context=ctx)
+
+    @classmethod
     def classify_exception(
         cls,
         exc: Exception,
@@ -367,6 +386,7 @@ class FailureClassifier:
         t_lower = exc_type.lower()
         net_patterns = [
             "timeouterror", "connectionerror", "connectionrefused", "connecttimeout", "readtimeout",
+            "connectionreseterror", "connectionreset", "econnreset",
             "could not connect", "connection timed out", "connection reset", "network is unreachable",
             "name or service not known", "getaddrinfofailed", "failed to connect", "08006", "08001",
             "57014", "statement timeout", "lock timeout", "deadlock detected", "operationalerror"
@@ -432,7 +452,10 @@ class FailureClassifier:
     def _is_agent_crash(cls, exc: Exception, exc_type: str, msg: str) -> bool:
         m_lower = msg.lower()
         t_lower = exc_type.lower()
-        crash_patterns = ["agent lost", "agent crash", "heartbeat ceased", "agent disconnected", "container terminated", "agentheartbeattimeout"]
+        crash_patterns = [
+            "agent lost", "agent crash", "agent heartbeat", "heartbeat ceased", "heartbeat timed out", "heartbeat missed",
+            "agent disconnected", "container terminated", "agentheartbeattimeout"
+        ]
         return any(p in m_lower or p in t_lower for p in crash_patterns)
 
     @classmethod
